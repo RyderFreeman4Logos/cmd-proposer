@@ -164,6 +164,12 @@ dependencies = [
 [[package]]
 name = "cps-agent"
 version = "0.1.0"
+dependencies = [
+ "cps-config",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+]
 
 [[package]]
 name = "cps-budget"
