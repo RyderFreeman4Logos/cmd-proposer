@@ -61,7 +61,7 @@ where
             return String::new();
         }
         match lookup(name) {
-            Some(v) if !v.is_empty() => v,
+            Some(v) if !v.is_empty() || default.is_none() => v,
             _ => match default {
                 Some(d) => d.to_string(),
                 None => {
