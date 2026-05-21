@@ -383,6 +383,8 @@ dependencies = [
  "cps-config",
  "cps-doc-store",
  "cps-tokenizer",
+ "serde",
+ "serde_json",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
