@@ -24,3 +24,6 @@ cps-proposal.workspace = true
 cps-search.workspace = true
 cps-exec.workspace = true
 cps-ui.workspace = true
+
+clap.workspace = true
+anyhow.workspace = true
