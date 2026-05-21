@@ -51,3 +51,4 @@ clap = { version = "4", features = ["derive"] }
 dotenvy = "0.15"
 regex = "1"
 dirs = "5"
+tokenizers = { version = "0.20", default-features = false, features = ["onig"] }
