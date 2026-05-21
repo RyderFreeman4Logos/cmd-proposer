@@ -146,6 +146,8 @@ pub struct AgentLoop<L = LlmClient> {
     model_name: String,
     layer_tokens: LayerTokenUsage,
     max_tool_rounds: usize,
+    transient_retries: u32,
+    retry_delay: std::time::Duration,
 }
 
 /// Dependencies needed to construct an [`AgentLoop`].
@@ -159,6 +161,8 @@ pub struct AgentLoopParts<L> {
     pub budget: BudgetEngine,
     pub session: SessionInit,
     pub subagent_pool: SubagentPool,
+    pub transient_retries: u32,
+    pub retry_delay_ms: u64,
 }
 
 impl AgentLoop<LlmClient> {
@@ -186,6 +190,8 @@ impl AgentLoop<LlmClient> {
             budget,
             session,
             subagent_pool,
+            transient_retries: config.runtime.transient_retries,
+            retry_delay_ms: config.runtime.retry_delay_ms,
         }))
     }
 }
@@ -231,6 +237,8 @@ impl<L> AgentLoop<L> {
             model_name: parts.model_name,
             layer_tokens,
             max_tool_rounds: MAX_TOOL_ROUNDS,
+            transient_retries: parts.transient_retries,
+            retry_delay: std::time::Duration::from_millis(parts.retry_delay_ms),
         }
     }
 
@@ -699,13 +707,11 @@ where
         self.refresh_budget_usage();
     }
 
-    const MAX_TRANSIENT_RETRIES: u32 = 2;
-
     async fn llm_call_with_retry(
         &self,
         request: &ChatRequest,
     ) -> std::result::Result<cps_llm::ChatResponse, cps_llm::LlmError> {
-        for attempt in 0..=Self::MAX_TRANSIENT_RETRIES {
+        for attempt in 0..=self.transient_retries {
             let result = self
                 .llm
                 .complete_streaming(request, |chunk| {
@@ -716,10 +722,15 @@ where
                 .await;
             match result {
                 Ok(resp) => return Ok(resp),
-                Err(e) if e.is_transient() && attempt < Self::MAX_TRANSIENT_RETRIES => {
-                    let delay = 1u64 << attempt; // 1s, 2s
-                    tracing::warn!(attempt, delay_s = delay, %e, "transient LLM error, retrying");
-                    tokio::time::sleep(std::time::Duration::from_secs(delay)).await;
+                Err(e) if e.is_transient() && attempt < self.transient_retries => {
+                    tracing::warn!(
+                        attempt,
+                        max = self.transient_retries,
+                        delay_ms = self.retry_delay.as_millis() as u64,
+                        %e,
+                        "transient LLM error, retrying"
+                    );
+                    tokio::time::sleep(self.retry_delay).await;
                 }
                 Err(e) => return Err(e),
             }
@@ -1427,6 +1438,8 @@ mod tests {
             budget,
             session,
             subagent_pool: SubagentPool::new(2, 60000),
+            transient_retries: 2,
+            retry_delay_ms: 100,
         })
     }
 

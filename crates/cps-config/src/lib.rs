@@ -134,6 +134,12 @@ pub struct RuntimeConfig {
 
     #[serde(default = "default_ui_progress_interval_ms")]
     pub ui_progress_interval_ms: u64,
+
+    #[serde(default = "default_transient_retries")]
+    pub transient_retries: u32,
+
+    #[serde(default = "default_retry_delay_ms")]
+    pub retry_delay_ms: u64,
 }
 
 fn default_global_timeout_ms() -> u64 {
@@ -145,6 +151,12 @@ fn default_request_timeout_ms() -> u64 {
 fn default_ui_progress_interval_ms() -> u64 {
     5_000
 }
+fn default_transient_retries() -> u32 {
+    2
+}
+fn default_retry_delay_ms() -> u64 {
+    1_000
+}
 
 impl Default for RuntimeConfig {
     fn default() -> Self {
@@ -152,6 +164,8 @@ impl Default for RuntimeConfig {
             global_timeout_ms: default_global_timeout_ms(),
             request_timeout_ms: default_request_timeout_ms(),
             ui_progress_interval_ms: default_ui_progress_interval_ms(),
+            transient_retries: default_transient_retries(),
+            retry_delay_ms: default_retry_delay_ms(),
         }
     }
 }
