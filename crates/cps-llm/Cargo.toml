@@ -8,3 +8,16 @@ rust-version.workspace = true
 description = "OpenAI-compatible API client with streaming and tool-call parsing"
 
 [dependencies]
+cps-config.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+anyhow.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+futures-util.workspace = true
+async-trait.workspace = true
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
