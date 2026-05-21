@@ -152,6 +152,10 @@ version = "0.1.0"
 [[package]]
 name = "cps-budget"
 version = "0.1.0"
+dependencies = [
+ "cps-config",
+ "serde_yaml",
+]
 
 [[package]]
 name = "cps-config"

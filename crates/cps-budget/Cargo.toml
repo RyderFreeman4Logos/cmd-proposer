@@ -8,3 +8,7 @@ rust-version.workspace = true
 description = "Token budget computation (% of effective_context) for cmd-proposer"
 
 [dependencies]
+cps-config.workspace = true
+
+[dev-dependencies]
+serde_yaml.workspace = true
