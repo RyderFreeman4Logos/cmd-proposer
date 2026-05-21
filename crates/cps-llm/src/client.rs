@@ -251,7 +251,7 @@ where
             Ok(None) => continue, // [DONE] or keepalive
             Ok(Some((chunk, usage))) => {
                 trace!(?chunk, "sse chunk");
-                assembler.ingest(&chunk);
+                assembler.ingest(&chunk)?;
                 assembler.set_usage(usage);
                 callback(chunk);
             }

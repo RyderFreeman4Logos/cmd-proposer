@@ -26,9 +26,7 @@ mod types;
 pub use client::{ClientConfig, LlmClient};
 pub use error::{LlmError, Result};
 pub use stream::{StreamChunk, ToolCallDelta};
-pub use types::{
-    ChatRequest, ChatResponse, FunctionCall, Message, Role, ToolCall, Usage,
-};
+pub use types::{ChatRequest, ChatResponse, FunctionCall, Message, Role, ToolCall, Usage};
 
 // `parse_event` and `StreamAssembler` are intentionally crate-private — the
 // only supported way to consume streams is via `LlmClient::complete_streaming`.
@@ -174,8 +172,7 @@ mod tests {
             }],
             "usage": {"prompt_tokens": 12, "completion_tokens": 34, "total_tokens": 46}
         });
-        let parsed: super::types::ChatCompletionResponse =
-            serde_json::from_value(raw).unwrap();
+        let parsed: super::types::ChatCompletionResponse = serde_json::from_value(raw).unwrap();
         assert_eq!(parsed.choices.len(), 1);
         let choice = &parsed.choices[0];
         assert_eq!(choice.message.role, Role::Assistant);
@@ -189,6 +186,32 @@ mod tests {
     }
 
     #[test]
+    fn non_streaming_tool_call_response_accepts_null_content() {
+        let raw = json!({
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": null,
+                    "tool_calls": [{
+                        "id": "call_null",
+                        "type": "function",
+                        "function": {
+                            "name": "read_help",
+                            "arguments": "{\"program\":\"kubectl\"}"
+                        }
+                    }]
+                },
+                "finish_reason": "tool_calls"
+            }]
+        });
+
+        let parsed: super::types::ChatCompletionResponse = serde_json::from_value(raw).unwrap();
+        let message = &parsed.choices[0].message;
+        assert_eq!(message.content, "");
+        assert_eq!(message.tool_calls.as_ref().unwrap()[0].id, "call_null");
+    }
+
+    #[test]
     fn non_streaming_plain_assistant_response_parses() {
         let raw = json!({
             "choices": [{
@@ -196,8 +219,7 @@ mod tests {
                 "finish_reason": "stop"
             }]
         });
-        let parsed: super::types::ChatCompletionResponse =
-            serde_json::from_value(raw).unwrap();
+        let parsed: super::types::ChatCompletionResponse = serde_json::from_value(raw).unwrap();
         let m = &parsed.choices[0].message;
         assert_eq!(m.role, Role::Assistant);
         assert_eq!(m.content, "hi there");
@@ -256,21 +278,21 @@ mod tests {
         )
         .unwrap()
         .unwrap();
-        a.ingest(&c1);
+        a.ingest(&c1).unwrap();
         // Fragment 2: partial args
         let (c2, _) = super::stream::parse_event(
             r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"program\":\"kub"}}]}}]}"#,
         )
         .unwrap()
         .unwrap();
-        a.ingest(&c2);
+        a.ingest(&c2).unwrap();
         // Fragment 3: rest of args + finish
         let (c3, _) = super::stream::parse_event(
             r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"ectl\"}"}}]},"finish_reason":"tool_calls"}]}"#,
         )
         .unwrap()
         .unwrap();
-        a.ingest(&c3);
+        a.ingest(&c3).unwrap();
 
         let (msg, fr, _usage) = a.finalize();
         assert_eq!(msg.role, Role::Assistant);
@@ -294,9 +316,12 @@ mod tests {
         )
         .unwrap()
         .unwrap();
-        a.ingest(&c1);
+        a.ingest(&c1).unwrap();
         let (msg, _, _) = a.finalize();
-        assert!(msg.tool_calls.is_none(), "tool call without id/name must be dropped");
+        assert!(
+            msg.tool_calls.is_none(),
+            "tool call without id/name must be dropped"
+        );
     }
 
     #[test]
@@ -305,11 +330,28 @@ mod tests {
         for word in ["Hel", "lo, ", "world", "!"] {
             let payload = format!(r#"{{"choices":[{{"delta":{{"content":"{word}"}}}}]}}"#);
             let (chunk, _) = super::stream::parse_event(&payload).unwrap().unwrap();
-            a.ingest(&chunk);
+            a.ingest(&chunk).unwrap();
         }
         let (msg, _, _) = a.finalize();
         assert_eq!(msg.content, "Hello, world!");
         assert!(msg.tool_calls.is_none());
+    }
+
+    #[test]
+    fn stream_assembler_rejects_oversized_tool_call_index() {
+        let mut a = super::stream::StreamAssembler::default();
+        let chunk = StreamChunk {
+            delta_tool_calls: Some(vec![ToolCallDelta {
+                index: 1_000_000_000,
+                id: Some("call_large".into()),
+                function_name: Some("read_help".into()),
+                function_arguments_delta: Some("{}".into()),
+            }]),
+            ..StreamChunk::default()
+        };
+
+        let err = a.ingest(&chunk).unwrap_err();
+        assert!(matches!(err, LlmError::Malformed(message) if message.contains("tool call index")));
     }
 
     #[tokio::test]
@@ -392,7 +434,9 @@ mod tests {
         ));
         assert!(matches!(
             LlmError::from_status(429, String::new(), Some(30)),
-            LlmError::RateLimit { retry_after_secs: Some(30) }
+            LlmError::RateLimit {
+                retry_after_secs: Some(30)
+            }
         ));
         assert!(matches!(
             LlmError::from_status(425, "too early".into(), None),
@@ -416,13 +460,24 @@ mod tests {
     fn is_transient_matches_retryable_classes() {
         assert!(LlmError::Timeout { timeout_ms: 1000 }.is_transient());
         assert!(LlmError::Connection("refused".into()).is_transient());
-        assert!(LlmError::RateLimit { retry_after_secs: None }.is_transient());
+        assert!(LlmError::RateLimit {
+            retry_after_secs: None
+        }
+        .is_transient());
         assert!(LlmError::from_status(408, String::new(), None).is_transient());
         assert!(LlmError::from_status(425, String::new(), None).is_transient());
-        assert!(LlmError::Server { status: 500, body: String::new() }.is_transient());
+        assert!(LlmError::Server {
+            status: 500,
+            body: String::new()
+        }
+        .is_transient());
 
         assert!(!LlmError::Unauthorized.is_transient());
-        assert!(!LlmError::BadRequest { status: 400, body: String::new() }.is_transient());
+        assert!(!LlmError::BadRequest {
+            status: 400,
+            body: String::new()
+        }
+        .is_transient());
         assert!(!LlmError::Malformed("x".into()).is_transient());
         assert!(!LlmError::InvalidConfig("x".into()).is_transient());
     }

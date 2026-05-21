@@ -4,7 +4,7 @@
 //! `tool_call_id`, `function.arguments`) so the same struct serializes to
 //! any compatible endpoint (vLLM, SGLang, llama.cpp server, commercial APIs).
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 /// Message author role.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -28,7 +28,7 @@ pub struct Message {
     /// MAY be empty string when the assistant only emits tool calls. Some
     /// providers reject `null` here, others reject empty string — we always
     /// send the field as a (possibly empty) string for portability.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_null_string")]
     pub content: String,
 
     #[serde(skip_serializing_if = "Option::is_none", default)]
@@ -40,15 +40,30 @@ pub struct Message {
 
 impl Message {
     pub fn system(content: impl Into<String>) -> Self {
-        Self { role: Role::System, content: content.into(), tool_call_id: None, tool_calls: None }
+        Self {
+            role: Role::System,
+            content: content.into(),
+            tool_call_id: None,
+            tool_calls: None,
+        }
     }
 
     pub fn user(content: impl Into<String>) -> Self {
-        Self { role: Role::User, content: content.into(), tool_call_id: None, tool_calls: None }
+        Self {
+            role: Role::User,
+            content: content.into(),
+            tool_call_id: None,
+            tool_calls: None,
+        }
     }
 
     pub fn assistant(content: impl Into<String>) -> Self {
-        Self { role: Role::Assistant, content: content.into(), tool_call_id: None, tool_calls: None }
+        Self {
+            role: Role::Assistant,
+            content: content.into(),
+            tool_call_id: None,
+            tool_calls: None,
+        }
     }
 
     /// Build a `tool` response message tied to a specific call ID.
@@ -60,6 +75,13 @@ impl Message {
             tool_calls: None,
         }
     }
+}
+
+fn deserialize_null_string<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Ok(Option::<String>::deserialize(deserializer)?.unwrap_or_default())
 }
 
 /// A single tool/function call emitted by the assistant.
@@ -78,7 +100,9 @@ pub struct ToolCall {
     pub function: FunctionCall,
 }
 
-fn default_tool_type() -> String { "function".into() }
+fn default_tool_type() -> String {
+    "function".into()
+}
 
 /// Function name + raw JSON argument string.
 ///

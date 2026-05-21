@@ -10,7 +10,10 @@
 
 use serde::Deserialize;
 
+use crate::error::{LlmError, Result};
 use crate::types::{FunctionCall, Message, Role, ToolCall, Usage};
+
+const MAX_PARALLEL_TOOL_CALLS: usize = 128;
 
 /// One streamed event the caller's callback observes.
 ///
@@ -87,7 +90,9 @@ struct RawFunctionDelta {
 /// Returns `Ok(None)` for `[DONE]` sentinels and for events that carry
 /// neither a delta nor a finish reason (e.g. role-only header chunks); the
 /// caller should skip these without invoking the user callback.
-pub(crate) fn parse_event(json_str: &str) -> Result<Option<(StreamChunk, Option<Usage>)>, serde_json::Error> {
+pub(crate) fn parse_event(
+    json_str: &str,
+) -> std::result::Result<Option<(StreamChunk, Option<Usage>)>, serde_json::Error> {
     let trimmed = json_str.trim();
     if trimmed.is_empty() || trimmed == "[DONE]" {
         return Ok(None);
@@ -150,14 +155,23 @@ struct PartialToolCall {
 }
 
 impl StreamAssembler {
-    pub(crate) fn ingest(&mut self, chunk: &StreamChunk) {
+    pub(crate) fn ingest(&mut self, chunk: &StreamChunk) -> Result<()> {
         if let Some(c) = &chunk.delta_content {
             self.content.push_str(c);
         }
         if let Some(deltas) = &chunk.delta_tool_calls {
             for d in deltas {
+                let required_len = d.index.checked_add(1).ok_or_else(|| {
+                    LlmError::Malformed(format!("tool call index {} overflows usize", d.index))
+                })?;
+                if required_len > MAX_PARALLEL_TOOL_CALLS {
+                    return Err(LlmError::Malformed(format!(
+                        "tool call index {} exceeds max parallel tool calls {}",
+                        d.index, MAX_PARALLEL_TOOL_CALLS
+                    )));
+                }
                 if self.tool_calls.len() <= d.index {
-                    self.tool_calls.resize_with(d.index + 1, || None);
+                    self.tool_calls.resize_with(required_len, || None);
                 }
                 let slot = self.tool_calls[d.index].get_or_insert_with(PartialToolCall::default);
                 if let Some(id) = &d.id {
@@ -174,6 +188,7 @@ impl StreamAssembler {
         if let Some(r) = &chunk.finish_reason {
             self.finish_reason = Some(r.clone());
         }
+        Ok(())
     }
 
     pub(crate) fn set_usage(&mut self, usage: Option<Usage>) {
@@ -198,7 +213,10 @@ impl StreamAssembler {
                 Some(ToolCall {
                     id,
                     call_type: "function".into(),
-                    function: FunctionCall { name, arguments: p.arguments },
+                    function: FunctionCall {
+                        name,
+                        arguments: p.arguments,
+                    },
                 })
             })
             .collect();
@@ -207,7 +225,11 @@ impl StreamAssembler {
             role: Role::Assistant,
             content: self.content,
             tool_call_id: None,
-            tool_calls: if tool_calls.is_empty() { None } else { Some(tool_calls) },
+            tool_calls: if tool_calls.is_empty() {
+                None
+            } else {
+                Some(tool_calls)
+            },
         };
         (message, self.finish_reason, self.usage)
     }
