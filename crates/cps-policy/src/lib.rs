@@ -1,5 +1,9 @@
 //! Tool-call validation, proposal checking, and risk classification (the Policy Gate).
 
+mod checker;
+
+pub use checker::{ProposalChecker, ProposalVerdict};
+
 use std::collections::{HashMap, HashSet};
 
 use cps_proposal::{CommandProposal, Risk};
