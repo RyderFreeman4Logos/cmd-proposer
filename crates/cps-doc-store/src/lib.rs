@@ -109,6 +109,12 @@ struct StoredDoc {
     line_count: usize,
     token_estimate: usize,
     source_kind: SourceKind,
+    /// Monotonically increases each time this `doc_id` is replaced via
+    /// [`DocStore::insert`]. Used to detect that a doc body has been
+    /// swapped between a [`DocStore::doc_grep`]'s read-lock and write-lock
+    /// halves, or between match registration and a later
+    /// [`DocStore::doc_expand_around`] lookup.
+    generation: u64,
 }
 
 impl StoredDoc {
@@ -131,6 +137,10 @@ impl StoredDoc {
 struct MatchPosition {
     doc_id: String,
     line: usize,
+    /// Snapshot of the doc's generation at the time the match was registered.
+    /// If the doc has since been replaced, [`DocStore::doc_expand_around`]
+    /// rejects the handle rather than reading lines from an unrelated body.
+    generation: u64,
 }
 
 #[derive(Debug, Default)]
@@ -175,19 +185,27 @@ impl DocStore {
         let line_count = count_lines(&raw_text);
         let token_estimate = tokenizer.count_tokens(&raw_text);
 
+        let mut guard = self.inner.write().expect("DocStore lock poisoned");
+        let generation = guard
+            .docs
+            .get(&doc_id)
+            .map(|d| d.generation.wrapping_add(1))
+            .unwrap_or(0);
         let doc = StoredDoc {
             raw_text,
             byte_len,
             line_count,
             token_estimate,
             source_kind,
+            generation,
         };
         let meta = doc.meta(&doc_id);
-        let mut guard = self.inner.write().expect("DocStore lock poisoned");
         // Replacing a doc invalidates any prior grep handles into it — their
         // line numbers may now point past EOF and `doc_expand_around` would
         // panic on the resulting empty slice. Drop all stale matches for this
-        // doc_id before swapping the body in.
+        // doc_id before swapping the body in. The generation bump below also
+        // catches handles registered by an in-flight grep that hasn't yet
+        // acquired its write lock — see `doc_grep` for the race.
         guard.matches.retain(|_, pos| pos.doc_id != doc_id);
         guard.docs.insert(doc_id, doc);
         meta
@@ -280,14 +298,21 @@ impl DocStore {
         // Collect owned line copies under the read lock, then release it
         // before acquiring the write lock for the match registry — a single
         // thread holding both shared and exclusive on the same `RwLock` is
-        // implementation-defined behavior in `std::sync::RwLock`.
-        let owned_lines: Vec<String> = {
+        // implementation-defined behavior in `std::sync::RwLock`. Capture the
+        // doc's generation alongside the body so that we can detect a
+        // concurrent insert that runs between the two lock halves; without
+        // this check we'd register match handles whose line numbers point at
+        // a body that no longer exists.
+        let (owned_lines, captured_generation): (Vec<String>, u64) = {
             let guard = self.inner.read().expect("DocStore lock poisoned");
             let doc = guard
                 .docs
                 .get(doc_id)
                 .ok_or_else(|| DocStoreError::DocNotFound(doc_id.to_string()))?;
-            doc.raw_text.lines().map(str::to_string).collect()
+            (
+                doc.raw_text.lines().map(str::to_string).collect(),
+                doc.generation,
+            )
         };
 
         let mut hits: Vec<(usize, String)> = Vec::new();
@@ -303,6 +328,14 @@ impl DocStore {
 
         let mut out = Vec::with_capacity(hits.len());
         let mut guard = self.inner.write().expect("DocStore lock poisoned");
+        // If a concurrent insert replaced the doc since we captured it, the
+        // line numbers above point at a stale body. Discard the matches
+        // rather than register handles that would silently read from the
+        // new body when later expanded.
+        match guard.docs.get(doc_id) {
+            Some(current) if current.generation == captured_generation => {}
+            _ => return Ok(Vec::new()),
+        }
         for (index, (line_number, line_text)) in hits.into_iter().enumerate() {
             let match_id = format!("{doc_id}:L{line_number}:I{index}");
             let (before, after) = window_context(&lines, line_number, context_lines);
@@ -311,6 +344,7 @@ impl DocStore {
                 MatchPosition {
                     doc_id: doc_id.to_string(),
                     line: line_number,
+                    generation: captured_generation,
                 },
             );
             out.push(GrepMatch {
@@ -442,11 +476,21 @@ impl DocStore {
             .docs
             .get(doc_id)
             .ok_or_else(|| DocStoreError::DocNotFound(doc_id.to_string()))?;
+        // A doc may have been replaced after this match was registered
+        // (handle survived because the lazy retain in `insert` ran before
+        // our match was inserted, see `doc_grep`'s race comment). The line
+        // number is meaningless against the new body — reject the handle.
+        if doc.generation != position.generation {
+            return Err(DocStoreError::MatchNotFound(match_id.to_string()));
+        }
 
         let lines: Vec<&str> = doc.raw_text.lines().collect();
         let line_idx = position.line.saturating_sub(1);
         let start = line_idx.saturating_sub(before);
-        let end = (line_idx + after + 1).min(lines.len());
+        let end = line_idx
+            .saturating_add(after)
+            .saturating_add(1)
+            .min(lines.len());
         let mut out = String::new();
         for line in &lines[start..end] {
             out.push_str(line);
