@@ -42,7 +42,7 @@ const MUTATING_VERBS: &[&str] = &[
 ];
 
 /// Policy options loaded from the runtime configuration.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PolicyConfig {
     pub allow_programs: Vec<String>,
     pub allowed_roles: Vec<String>,
@@ -50,19 +50,6 @@ pub struct PolicyConfig {
     pub search_enabled: bool,
     pub execute_enabled: bool,
     pub max_subagent_context: usize,
-}
-
-impl Default for PolicyConfig {
-    fn default() -> Self {
-        Self {
-            allow_programs: Vec::new(),
-            allowed_roles: Vec::new(),
-            role_tool_permissions: HashMap::new(),
-            search_enabled: false,
-            execute_enabled: false,
-            max_subagent_context: 0,
-        }
-    }
 }
 
 /// Runtime policy gate.
@@ -536,7 +523,7 @@ fn has_critical_pattern(tokens: &[String]) -> bool {
         )
     });
 
-    (has_all && destructive) || (has_force && destructive)
+    (has_all || has_force) && destructive
 }
 
 fn is_rm_recursive_force(tokens: &[String]) -> bool {

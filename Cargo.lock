@@ -195,10 +195,21 @@ dependencies = [
 name = "cps-agent"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
+ "cps-budget",
  "cps-config",
+ "cps-doc-runner",
+ "cps-doc-store",
+ "cps-llm",
+ "cps-policy",
+ "cps-proposal",
+ "cps-tokenizer",
  "serde",
  "serde_json",
  "serde_yaml",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

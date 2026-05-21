@@ -1,12 +1,16 @@
 //! Main agent loop, evidence compression, and parallel subagent pool.
 //!
-//! Today this crate exposes only the session-prefix builder
-//! ([`SessionInit`]): the immutable system prompt + tool definitions sent to
-//! the LLM once per session. The agent loop itself is added by a later issue.
+//! The crate owns both the immutable session prefix ([`SessionInit`]) and the
+//! main conversation runtime ([`AgentLoop`]).
 
+pub mod agent_loop;
 pub mod session;
 pub mod system_prompt;
 pub mod tools;
 
+pub use agent_loop::{
+    AgentError, AgentLoop, AgentLoopParts, AgentState, CompletionClient, LayerTokenUsage, Result,
+    TurnResult,
+};
 pub use session::SessionInit;
 pub use tools::ToolFeatureFlags;
