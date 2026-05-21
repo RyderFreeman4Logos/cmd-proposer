@@ -106,6 +106,7 @@ mod tests {
             max_completion_tokens: Some(2048),
             stream: true,
             temperature: None,
+            tool_choice: None,
         };
 
         let v = serde_json::to_value(&req).unwrap();

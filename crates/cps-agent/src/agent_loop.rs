@@ -301,6 +301,18 @@ where
                 return self.finish_proposal(proposal);
             }
 
+            // Reasoning-only models (e.g. Qwen3) may return content="" with
+            // no tool calls on the first pass. Nudge them to use tools rather
+            // than giving up immediately.
+            if assistant.content.trim().is_empty() && round < self.max_tool_rounds - 1 {
+                tracing::warn!(round, "model returned empty content without tool calls — nudging");
+                self.append_user_message(
+                    "You must use the available tools to explore documentation. \
+                     Call read_help, doc_grep, or another tool now.",
+                );
+                continue;
+            }
+
             self.state = AgentState::HumanReview;
             return Ok(TurnResult {
                 state: self.state,
@@ -713,6 +725,7 @@ where
             max_completion_tokens: Some(self.budget.thinking_budget()),
             stream: true,
             temperature: None,
+            tool_choice: Some(serde_json::Value::String("auto".to_owned())),
         })
     }
 
