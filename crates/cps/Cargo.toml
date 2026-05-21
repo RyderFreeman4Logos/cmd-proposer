@@ -1,0 +1,26 @@
+[package]
+name = "cps"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "cmd-proposer: sandboxed doc explorer + human-approved argv proposer for production ops"
+
+[[bin]]
+name = "cps"
+path = "src/main.rs"
+
+[dependencies]
+cps-config.workspace = true
+cps-budget.workspace = true
+cps-tokenizer.workspace = true
+cps-doc-store.workspace = true
+cps-doc-runner.workspace = true
+cps-policy.workspace = true
+cps-llm.workspace = true
+cps-agent.workspace = true
+cps-proposal.workspace = true
+cps-search.workspace = true
+cps-exec.workspace = true
+cps-ui.workspace = true

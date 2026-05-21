@@ -1,0 +1,10 @@
+[package]
+name = "cps-policy"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Tool call validation, proposal checking, and risk classification for cmd-proposer"
+
+[dependencies]
