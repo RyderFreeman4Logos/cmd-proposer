@@ -4,6 +4,17 @@
 //! validates them before process construction, runs only argv vectors inside
 //! a networkless bwrap sandbox, and stores captured output in [`DocStore`] as
 //! [`SourceKind::LocalDoc`].
+//!
+//! For programs that support `__schema --format=json`, the runner can also
+//! retrieve a structured [`CliSchema`] (see [`schema`] module) before falling
+//! back to `--help` exploration. Schema evidence is tagged as
+//! [`SourceKind::LocalSchema`] — the highest trust tier.
+
+pub mod schema;
+
+pub use schema::{
+    ArgSchema, CliSchema, FlagSchema, FlagType, SubcommandSchema,
+};
 
 use std::ffi::OsString;
 use std::io;
@@ -109,6 +120,58 @@ impl DocRunner {
         let argv = vec!["info".to_string(), topic.to_string()];
         self.capture_to_store(info_doc_id(topic), &argv, doc_store, tokenizer)
             .await
+    }
+
+    /// Attempt to retrieve a structured CLI schema from `program` by running
+    /// `<program> __schema --format=json` inside the bwrap sandbox.
+    ///
+    /// Returns `Some(CliSchema)` on success. If the command fails or the
+    /// output is not valid schema JSON, returns `None` — the caller should
+    /// fall back to `--help`/`man`/`info` exploration.
+    ///
+    /// When a schema is successfully parsed, its JSON representation is also
+    /// stored in `doc_store` under doc_id `schema:<program>` with
+    /// [`SourceKind::LocalSchema`] (highest trust).
+    pub async fn try_schema(
+        &self,
+        program: &str,
+        doc_store: &DocStore,
+        tokenizer: &dyn Tokenizer,
+    ) -> Option<schema::CliSchema> {
+        self.ensure_program_allowed(program).ok()?;
+
+        let argv = vec![
+            program.to_string(),
+            "__schema".to_string(),
+            "--format=json".to_string(),
+        ];
+
+        let captured = match self.run_in_bwrap(&argv).await {
+            Ok(output) => output,
+            Err(error) => {
+                tracing::debug!(
+                    program = %program,
+                    error = %error,
+                    "schema retrieval failed; will fall back to --help"
+                );
+                return None;
+            }
+        };
+
+        let parsed = schema::parse_schema_json(&captured.text)?;
+
+        // Store the raw JSON as LocalSchema evidence in the doc store.
+        let doc_id = schema::schema_doc_id(program);
+        doc_store.insert(doc_id, captured.text, SourceKind::LocalSchema, tokenizer);
+
+        tracing::info!(
+            program = %program,
+            version = %parsed.version,
+            subcommands = parsed.subcommands.len(),
+            "parsed CLI schema successfully"
+        );
+
+        Some(parsed)
     }
 
     /// Build the std command used by tests and by callers that need to inspect
