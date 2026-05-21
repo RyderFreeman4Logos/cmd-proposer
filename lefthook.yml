@@ -1,0 +1,4 @@
+pre-push:
+  commands:
+    review-check:
+      run: scripts/hooks/review-check.sh

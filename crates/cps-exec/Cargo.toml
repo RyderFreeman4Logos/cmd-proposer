@@ -1,0 +1,10 @@
+[package]
+name = "cps-exec"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Execution runner and audit logging for cmd-proposer (argv-only, default OFF)"
+
+[dependencies]

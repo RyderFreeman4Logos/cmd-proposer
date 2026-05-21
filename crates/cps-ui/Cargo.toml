@@ -1,0 +1,10 @@
+[package]
+name = "cps-ui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "ratatui three-zone UI with key bindings and progress display for cmd-proposer"
+
+[dependencies]

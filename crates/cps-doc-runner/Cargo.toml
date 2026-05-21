@@ -1,0 +1,10 @@
+[package]
+name = "cps-doc-runner"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "bwrap sandbox execution for --help/man/info commands"
+
+[dependencies]
