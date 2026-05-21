@@ -1,10 +1,239 @@
 //! Web search providers (MCP/DuckDuckGo) and query redaction.
 
+use anyhow::{Context, Result};
+use async_trait::async_trait;
+use cps_doc_store::{DocMeta, DocStore, SourceKind};
+use cps_tokenizer::Tokenizer;
+use duckduckgo::browser::Browser;
+use duckduckgo::response::LiteSearchResult;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::sync::OnceLock;
+use std::time::Duration;
 use thiserror::Error;
-use tracing::debug;
+use tokio::time;
+use tracing::{debug, warn};
+
+const DDG_PROVIDER_NAME: &str = "duckduckgo";
+const DDG_DEFAULT_REGION: &str = "wt-wt";
+const DEFAULT_USER_AGENT: &str = concat!("cmd-proposer/", env!("CARGO_PKG_VERSION"));
+
+#[async_trait]
+pub trait SearchProvider: Send + Sync {
+    async fn search(&self, query: &str, max_results: usize) -> Result<Vec<SearchResult>>;
+    fn name(&self) -> &str;
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SearchResult {
+    pub title: String,
+    pub url: String,
+    pub snippet: String,
+    pub trust: TrustLevel,
+}
+
+impl SearchResult {
+    pub fn untrusted_web(title: String, url: String, snippet: String) -> Self {
+        Self {
+            title,
+            url,
+            snippet,
+            trust: TrustLevel::UntrustedWeb,
+        }
+    }
+
+    fn force_untrusted_web(&mut self) {
+        self.trust = TrustLevel::UntrustedWeb;
+    }
+
+    pub fn as_doc_text(&self) -> String {
+        format!(
+            "title: {}\nurl: {}\ntrust: {}\n\n{}",
+            self.title,
+            self.url,
+            self.trust.as_str(),
+            self.snippet
+        )
+    }
+}
+
+impl From<LiteSearchResult> for SearchResult {
+    fn from(result: LiteSearchResult) -> Self {
+        Self::untrusted_web(result.title, result.url, result.snippet)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TrustLevel {
+    LocalSchema,
+    LocalDoc,
+    OfficialWebDoc,
+    UntrustedWeb,
+}
+
+impl TrustLevel {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::LocalSchema => "local_schema",
+            Self::LocalDoc => "local_doc",
+            Self::OfficialWebDoc => "official_web_doc",
+            Self::UntrustedWeb => "untrusted_web",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DdgProvider {
+    timeout: Duration,
+}
+
+impl DdgProvider {
+    pub fn new(timeout: Duration) -> Self {
+        Self { timeout }
+    }
+
+    pub fn from_timeout_ms(timeout_ms: u64) -> Self {
+        Self::new(Duration::from_millis(timeout_ms))
+    }
+
+    pub fn timeout(&self) -> Duration {
+        self.timeout
+    }
+}
+
+impl Default for DdgProvider {
+    fn default() -> Self {
+        Self::new(Duration::from_secs(60))
+    }
+}
+
+#[async_trait]
+impl SearchProvider for DdgProvider {
+    async fn search(&self, query: &str, max_results: usize) -> Result<Vec<SearchResult>> {
+        if query.trim().is_empty() || max_results == 0 {
+            return Ok(Vec::new());
+        }
+
+        let browser = Browser::new();
+        let user_agent = duckduckgo::user_agents::get("firefox").unwrap_or(DEFAULT_USER_AGENT);
+        let search = browser.lite_search(query, DDG_DEFAULT_REGION, Some(max_results), user_agent);
+
+        let results = time::timeout(self.timeout, search)
+            .await
+            .context("DuckDuckGo search timed out")?
+            .context("DuckDuckGo search failed")?;
+
+        Ok(results
+            .into_iter()
+            .take(max_results)
+            .map(SearchResult::from)
+            .collect())
+    }
+
+    fn name(&self) -> &str {
+        DDG_PROVIDER_NAME
+    }
+}
+
+pub struct SearchEngine {
+    provider: Box<dyn SearchProvider>,
+    redactor: QueryRedactor,
+    enabled: bool,
+    session_override: Option<bool>,
+}
+
+impl SearchEngine {
+    pub fn new(provider: Box<dyn SearchProvider>, redactor: QueryRedactor, enabled: bool) -> Self {
+        Self {
+            provider,
+            redactor,
+            enabled,
+            session_override: None,
+        }
+    }
+
+    pub fn with_ddg(redactor: QueryRedactor, enabled: bool, timeout: Duration) -> Self {
+        Self::new(Box::new(DdgProvider::new(timeout)), redactor, enabled)
+    }
+
+    pub fn is_enabled(&self) -> bool {
+        self.session_override.unwrap_or(self.enabled)
+    }
+
+    pub fn set_online(&mut self) {
+        self.session_override = Some(true);
+    }
+
+    pub fn set_offline(&mut self) {
+        self.session_override = Some(false);
+    }
+
+    pub fn clear_session_override(&mut self) {
+        self.session_override = None;
+    }
+
+    pub async fn search(&self, query: &str, max_results: usize) -> Vec<SearchResult> {
+        if !self.is_enabled() || max_results == 0 {
+            return Vec::new();
+        }
+
+        let redaction = self.redactor.redact(query);
+        match self
+            .provider
+            .search(&redaction.redacted_query, max_results)
+            .await
+        {
+            Ok(mut results) => {
+                for result in &mut results {
+                    result.force_untrusted_web();
+                }
+                results.truncate(max_results);
+                results
+            }
+            Err(error) => {
+                warn!(
+                    provider = self.provider.name(),
+                    error = %error,
+                    "web search provider failed; returning empty results"
+                );
+                Vec::new()
+            }
+        }
+    }
+
+    pub async fn search_and_store(
+        &self,
+        query: &str,
+        max_results: usize,
+        doc_store: &DocStore,
+        doc_id_prefix: &str,
+        tokenizer: &dyn Tokenizer,
+    ) -> Vec<DocMeta> {
+        let results = self.search(query, max_results).await;
+        store_search_results(doc_store, doc_id_prefix, &results, tokenizer)
+    }
+}
+
+pub fn store_search_results(
+    doc_store: &DocStore,
+    doc_id_prefix: &str,
+    results: &[SearchResult],
+    tokenizer: &dyn Tokenizer,
+) -> Vec<DocMeta> {
+    results
+        .iter()
+        .enumerate()
+        .map(|(index, result)| {
+            doc_store.insert(
+                format!("{doc_id_prefix}:{}", index + 1),
+                result.as_doc_text(),
+                SourceKind::UntrustedWeb,
+                tokenizer,
+            )
+        })
+        .collect()
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct QueryRedactor {
@@ -492,9 +721,182 @@ fn email_regex() -> &'static Regex {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use anyhow::anyhow;
+    use cps_tokenizer::FallbackTokenizer;
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Clone)]
+    struct MockProvider {
+        queries: Arc<Mutex<Vec<String>>>,
+        results: Vec<SearchResult>,
+        fail: bool,
+    }
+
+    impl MockProvider {
+        fn ok(results: Vec<SearchResult>) -> (Self, Arc<Mutex<Vec<String>>>) {
+            let queries = Arc::new(Mutex::new(Vec::new()));
+            (
+                Self {
+                    queries: Arc::clone(&queries),
+                    results,
+                    fail: false,
+                },
+                queries,
+            )
+        }
+
+        fn failing() -> (Self, Arc<Mutex<Vec<String>>>) {
+            let queries = Arc::new(Mutex::new(Vec::new()));
+            (
+                Self {
+                    queries: Arc::clone(&queries),
+                    results: Vec::new(),
+                    fail: true,
+                },
+                queries,
+            )
+        }
+    }
+
+    #[async_trait]
+    impl SearchProvider for MockProvider {
+        async fn search(&self, query: &str, max_results: usize) -> Result<Vec<SearchResult>> {
+            self.queries
+                .lock()
+                .expect("query recorder lock should not be poisoned")
+                .push(query.to_owned());
+
+            if self.fail {
+                return Err(anyhow!("provider failed"));
+            }
+
+            Ok(self.results.iter().take(max_results).cloned().collect())
+        }
+
+        fn name(&self) -> &str {
+            "mock"
+        }
+    }
+
+    fn search_result_with_trust(trust: TrustLevel) -> SearchResult {
+        SearchResult {
+            title: "Rust docs".to_owned(),
+            url: "https://example.com/rust".to_owned(),
+            snippet: "Rust documentation".to_owned(),
+            trust,
+        }
+    }
 
     fn redact_with(rule: RedactionRule, query: &str) -> RedactionResult {
         QueryRedactor::with_rules(vec![rule], true).redact(query)
+    }
+
+    #[tokio::test]
+    async fn search_engine_forces_untrusted_web_trust() {
+        let (provider, _queries) =
+            MockProvider::ok(vec![search_result_with_trust(TrustLevel::LocalDoc)]);
+        let engine = SearchEngine::new(Box::new(provider), QueryRedactor::new(false), true);
+
+        let results = engine.search("rust docs", 5).await;
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].trust, TrustLevel::UntrustedWeb);
+        assert_eq!(results[0].trust.as_str(), "untrusted_web");
+    }
+
+    #[tokio::test]
+    async fn search_engine_redacts_query_before_provider_call() {
+        let (provider, queries) =
+            MockProvider::ok(vec![search_result_with_trust(TrustLevel::UntrustedWeb)]);
+        let redactor = QueryRedactor::with_rules(vec![RedactionRule::IPv4], true);
+        let engine = SearchEngine::new(Box::new(provider), redactor, true);
+
+        let results = engine.search("restart pod on 10.0.1.42", 5).await;
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(
+            *queries
+                .lock()
+                .expect("query recorder lock should not be poisoned"),
+            vec!["restart pod on <IP>".to_owned()]
+        );
+    }
+
+    #[tokio::test]
+    async fn session_online_offline_override_controls_search() {
+        let (provider, queries) =
+            MockProvider::ok(vec![search_result_with_trust(TrustLevel::UntrustedWeb)]);
+        let mut engine = SearchEngine::new(Box::new(provider), QueryRedactor::new(false), false);
+
+        assert!(engine.search("rust docs", 5).await.is_empty());
+        assert!(queries
+            .lock()
+            .expect("query recorder lock should not be poisoned")
+            .is_empty());
+
+        engine.set_online();
+        assert_eq!(engine.search("rust docs", 5).await.len(), 1);
+
+        engine.set_offline();
+        assert!(engine.search("rust docs", 5).await.is_empty());
+
+        engine.clear_session_override();
+        assert!(engine.search("rust docs", 5).await.is_empty());
+        assert_eq!(
+            queries
+                .lock()
+                .expect("query recorder lock should not be poisoned")
+                .len(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn disabled_search_returns_empty_results_without_provider_call() {
+        let (provider, queries) =
+            MockProvider::ok(vec![search_result_with_trust(TrustLevel::UntrustedWeb)]);
+        let engine = SearchEngine::new(Box::new(provider), QueryRedactor::new(false), false);
+
+        assert!(engine.search("rust docs", 5).await.is_empty());
+        assert!(queries
+            .lock()
+            .expect("query recorder lock should not be poisoned")
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn provider_failure_returns_empty_results() {
+        let (provider, queries) = MockProvider::failing();
+        let engine = SearchEngine::new(Box::new(provider), QueryRedactor::new(false), true);
+
+        assert!(engine.search("rust docs", 5).await.is_empty());
+        assert_eq!(
+            queries
+                .lock()
+                .expect("query recorder lock should not be poisoned")
+                .as_slice(),
+            ["rust docs"]
+        );
+    }
+
+    #[test]
+    fn store_search_results_uses_untrusted_web_source_kind() {
+        let doc_store = DocStore::new();
+        let tokenizer = FallbackTokenizer::new();
+        let results = vec![search_result_with_trust(TrustLevel::UntrustedWeb)];
+
+        let metas = store_search_results(&doc_store, "web_search:test", &results, &tokenizer);
+
+        assert_eq!(metas.len(), 1);
+        assert_eq!(metas[0].source_kind, SourceKind::UntrustedWeb);
+        let meta = doc_store
+            .doc_token_count("web_search:test:1")
+            .expect("stored search result should be retrievable");
+        assert_eq!(meta.source_kind, SourceKind::UntrustedWeb);
+        let preview = doc_store
+            .doc_preview("web_search:test:1", usize::MAX, &tokenizer)
+            .expect("stored search result preview should be retrievable");
+        assert!(preview.contains("trust: untrusted_web"));
     }
 
     #[test]

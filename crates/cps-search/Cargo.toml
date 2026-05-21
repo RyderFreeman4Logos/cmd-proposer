@@ -8,8 +8,14 @@ rust-version.workspace = true
 description = "Web search providers and query redaction for cmd-proposer"
 
 [dependencies]
+anyhow.workspace = true
+async-trait.workspace = true
+cps-doc-store.workspace = true
+cps-tokenizer.workspace = true
+duckduckgo.workspace = true
 regex.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+tokio.workspace = true
 tracing.workspace = true
