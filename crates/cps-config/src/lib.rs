@@ -171,6 +171,12 @@ pub struct SearchConfig {
 
     #[serde(default = "default_redaction_rules")]
     pub redaction_rules: Vec<String>,
+
+    #[serde(default)]
+    pub internal_domains: Vec<String>,
+
+    #[serde(default)]
+    pub sensitive_namespaces: Vec<String>,
 }
 
 fn default_search_enabled() -> bool {
@@ -197,6 +203,7 @@ fn default_redaction_rules() -> Vec<String> {
         "ipv6".into(),
         "email".into(),
         "internal_domain".into(),
+        "k8s_namespace".into(),
     ]
 }
 
@@ -207,6 +214,8 @@ impl Default for SearchConfig {
             providers: default_search_providers(),
             redact_queries: default_redact_queries(),
             redaction_rules: default_redaction_rules(),
+            internal_domains: Vec::new(),
+            sensitive_namespaces: Vec::new(),
         }
     }
 }
@@ -520,6 +529,8 @@ doc_runner:
         assert!(cfg.search.redact_queries);
         assert_eq!(cfg.search.providers.len(), 1);
         assert_eq!(cfg.search.providers[0].name, "ddg_mcp");
+        assert!(cfg.search.internal_domains.is_empty());
+        assert!(cfg.search.sensitive_namespaces.is_empty());
         assert_eq!(cfg.doc_runner.sandbox, "bwrap");
         assert_eq!(cfg.doc_runner.timeout_ms, 60_000);
         assert_eq!(cfg.doc_runner.max_output_bytes, 10_485_760);
@@ -536,6 +547,24 @@ doc_runner:
         assert!(cfg.approval.high_risk_requires_typed_confirmation);
         assert!(cfg.risk.high_risk_tokens.contains(&"delete".to_string()));
         assert!(cfg.risk.always_require_review.contains(&"sudo".to_string()));
+    }
+
+    #[test]
+    fn search_redaction_patterns_parse_from_config() {
+        let yaml = format!(
+            "{}\nsearch:\n  internal_domains: [\"*.internal.corp\", \"*.prod.*\"]\n  sensitive_namespaces: [\"prod-*\", \"staging-*\"]\n",
+            minimal_yaml()
+        );
+        let cfg: Config = serde_yaml::from_str(&yaml).expect("parse");
+
+        assert_eq!(
+            cfg.search.internal_domains,
+            vec!["*.internal.corp".to_string(), "*.prod.*".to_string()]
+        );
+        assert_eq!(
+            cfg.search.sensitive_namespaces,
+            vec!["prod-*".to_string(), "staging-*".to_string()]
+        );
     }
 
     #[test]

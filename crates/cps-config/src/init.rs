@@ -68,6 +68,9 @@ model:
 #     - ipv6
 #     - email
 #     - internal_domain
+#     - k8s_namespace
+#   internal_domains: ["*.internal.corp", "*.prod.*"]  # default: []
+#   sensitive_namespaces: ["prod-*", "staging-*"]      # default: []
 
 doc_runner:
   allow_programs: [kubectl, helm, terraform]  # REQUIRED: whitelist of explorable programs
