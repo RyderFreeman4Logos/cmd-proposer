@@ -140,6 +140,9 @@ pub struct RuntimeConfig {
 
     #[serde(default = "default_retry_delay_ms")]
     pub retry_delay_ms: u64,
+
+    #[serde(default = "default_max_tool_rounds")]
+    pub max_tool_rounds: usize,
 }
 
 fn default_global_timeout_ms() -> u64 {
@@ -157,6 +160,9 @@ fn default_transient_retries() -> u32 {
 fn default_retry_delay_ms() -> u64 {
     1_000
 }
+fn default_max_tool_rounds() -> usize {
+    20
+}
 
 impl Default for RuntimeConfig {
     fn default() -> Self {
@@ -166,6 +172,7 @@ impl Default for RuntimeConfig {
             ui_progress_interval_ms: default_ui_progress_interval_ms(),
             transient_retries: default_transient_retries(),
             retry_delay_ms: default_retry_delay_ms(),
+            max_tool_rounds: default_max_tool_rounds(),
         }
     }
 }

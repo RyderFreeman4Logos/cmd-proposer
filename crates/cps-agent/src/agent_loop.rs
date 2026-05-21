@@ -32,7 +32,7 @@ use crate::message_manager::MessageManager;
 use crate::session::SessionInit;
 use crate::subagent::{SpawnRequest, SubagentPool, SubagentRole};
 
-const MAX_TOOL_ROUNDS: usize = 8;
+const DEFAULT_MAX_TOOL_ROUNDS: usize = 20;
 const DOC_EXPLORER_ROLE: &str = "doc_explorer";
 const RISK_REVIEWER_ROLE: &str = "risk_reviewer";
 
@@ -181,6 +181,7 @@ pub struct AgentLoopParts<L> {
     pub subagent_pool: SubagentPool,
     pub transient_retries: u32,
     pub retry_delay_ms: u64,
+    pub max_tool_rounds: usize,
     pub counters: Option<Arc<TokenCounters>>,
 }
 
@@ -211,6 +212,7 @@ impl AgentLoop<LlmClient> {
             subagent_pool,
             transient_retries: config.runtime.transient_retries,
             retry_delay_ms: config.runtime.retry_delay_ms,
+            max_tool_rounds: config.runtime.max_tool_rounds,
             counters: None,
         }))
     }
@@ -256,7 +258,11 @@ impl<L> AgentLoop<L> {
             message_manager,
             model_name: parts.model_name,
             layer_tokens,
-            max_tool_rounds: MAX_TOOL_ROUNDS,
+            max_tool_rounds: if parts.max_tool_rounds > 0 {
+                parts.max_tool_rounds
+            } else {
+                DEFAULT_MAX_TOOL_ROUNDS
+            },
             transient_retries: parts.transient_retries,
             retry_delay: std::time::Duration::from_millis(parts.retry_delay_ms),
             counters,
@@ -1494,6 +1500,7 @@ mod tests {
             subagent_pool: SubagentPool::new(2, 60000),
             transient_retries: 2,
             retry_delay_ms: 100,
+            max_tool_rounds: 8,
             counters: None,
         })
     }
