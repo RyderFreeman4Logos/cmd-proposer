@@ -228,7 +228,7 @@ impl DocStore {
         let mut out = String::new();
         let mut used = 0usize;
         for line in doc.raw_text.split_inclusive('\n') {
-            let next = tokenizer.count_tokens(line);
+            let next = tokenizer.count_tokens(line).max(if line.is_empty() { 0 } else { 1 });
             if used + next > max_tokens {
                 break;
             }
@@ -367,7 +367,7 @@ impl DocStore {
         let mut used = 0usize;
         for line in &lines[start..end] {
             let chunk = format!("{}\n", line);
-            let next = tokenizer.count_tokens(&chunk);
+            let next = tokenizer.count_tokens(&chunk).max(if chunk.trim().is_empty() { 0 } else { 1 });
             if max_tokens > 0 && used + next > max_tokens {
                 break;
             }
@@ -377,11 +377,10 @@ impl DocStore {
         Ok(out)
     }
 
-    /// Return lines `[start, end]` inclusive (1-indexed).
+    /// Return lines `[start, end)` half-open (1-indexed).
     ///
     /// Returns `InvalidLineRange` if `start == 0` or `end < start`. Out-of-
-    /// range tails are silently truncated to the doc end — asking for lines
-    /// 1..1000 on a 50-line doc returns all 50 lines without error.
+    /// range tails are silently truncated to the doc end.
     pub fn doc_lines(&self, doc_id: &str, start: usize, end: usize) -> Result<String> {
         if start == 0 || end < start {
             return Err(DocStoreError::InvalidLineRange { start, end });
@@ -398,7 +397,7 @@ impl DocStore {
             if n < start {
                 continue;
             }
-            if n > end {
+            if n >= end {
                 break;
             }
             out.push_str(line);
@@ -465,7 +464,7 @@ fn count_lines(s: &str) -> usize {
 fn window_context(lines: &[&str], line_number: usize, radius: usize) -> (Vec<String>, Vec<String>) {
     let idx = line_number.saturating_sub(1);
     let before_start = idx.saturating_sub(radius);
-    let after_end = (idx + radius + 1).min(lines.len());
+    let after_end = idx.saturating_add(radius).saturating_add(1).min(lines.len());
     let before = lines[before_start..idx].iter().map(|s| s.to_string()).collect();
     let after = lines[(idx + 1).min(lines.len())..after_end]
         .iter()
@@ -737,10 +736,10 @@ OPTIONS
     }
 
     #[test]
-    fn doc_lines_returns_inclusive_range() {
+    fn doc_lines_returns_half_open_range() {
         let (store, _, _) = store_with("L1\nL2\nL3\nL4\nL5\n");
         let out = store.doc_lines("d1", 2, 4).expect("ok");
-        assert_eq!(out, "L2\nL3\nL4\n");
+        assert_eq!(out, "L2\nL3\n");
     }
 
     #[test]
