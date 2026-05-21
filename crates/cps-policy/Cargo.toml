@@ -8,3 +8,10 @@ rust-version.workspace = true
 description = "Tool call validation, proposal checking, and risk classification for cmd-proposer"
 
 [dependencies]
+anyhow = { workspace = true }
+cps-proposal = { workspace = true }
+regex = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
