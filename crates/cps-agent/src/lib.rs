@@ -6,6 +6,7 @@
 pub mod agent_loop;
 pub mod budget;
 pub mod session;
+pub mod subagent;
 pub mod system_prompt;
 pub mod tools;
 
@@ -15,4 +16,7 @@ pub use agent_loop::{
 };
 pub use budget::{BudgetStatus, BudgetTracker};
 pub use session::SessionInit;
+pub use subagent::{
+    SubagentError, SubagentPool, SubagentResult, SubagentRole, SubagentStatus, SpawnRequest,
+};
 pub use tools::ToolFeatureFlags;

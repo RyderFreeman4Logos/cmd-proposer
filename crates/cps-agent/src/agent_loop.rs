@@ -28,6 +28,7 @@ use crate::budget::{
     BudgetTracker,
 };
 use crate::session::SessionInit;
+use crate::subagent::{SubagentPool, SpawnRequest, SubagentRole};
 
 const MAX_TOOL_ROUNDS: usize = 8;
 const DOC_EXPLORER_ROLE: &str = "doc_explorer";
@@ -98,6 +99,11 @@ pub trait CompletionClient: Send + Sync {
     ) -> Pin<Box<dyn Future<Output = cps_llm::Result<ChatResponse>> + Send + 'a>>
     where
         F: FnMut(StreamChunk) + Send + 'a;
+
+    fn complete<'a>(
+        &'a self,
+        request: &'a ChatRequest,
+    ) -> Pin<Box<dyn Future<Output = cps_llm::Result<ChatResponse>> + Send + 'a>>;
 }
 
 impl CompletionClient for LlmClient {
@@ -110,6 +116,13 @@ impl CompletionClient for LlmClient {
         F: FnMut(StreamChunk) + Send + 'a,
     {
         Box::pin(async move { LlmClient::complete_streaming(self, request, callback).await })
+    }
+
+    fn complete<'a>(
+        &'a self,
+        request: &'a ChatRequest,
+    ) -> Pin<Box<dyn Future<Output = cps_llm::Result<ChatResponse>> + Send + 'a>> {
+        Box::pin(async move { LlmClient::complete(self, request).await })
     }
 }
 
@@ -126,6 +139,7 @@ pub struct AgentLoop<L = LlmClient> {
     pub messages: Vec<Message>,
     pub system_prompt: String,
     pub tool_definitions: Vec<Value>,
+    pub subagent_pool: SubagentPool,
 
     model_name: String,
     layer_tokens: LayerTokenUsage,
@@ -142,6 +156,7 @@ pub struct AgentLoopParts<L> {
     pub tokenizer: Arc<dyn Tokenizer>,
     pub budget: BudgetEngine,
     pub session: SessionInit,
+    pub subagent_pool: SubagentPool,
 }
 
 impl AgentLoop<LlmClient> {
@@ -154,6 +169,10 @@ impl AgentLoop<LlmClient> {
         let budget = BudgetEngine::from_config(config);
         let policy = PolicyGate::new(policy_config_from_config(config, budget));
         let session = SessionInit::from_config(config);
+        let subagent_pool = SubagentPool::new(
+            config.subagents.max_parallel as usize,
+            config.subagents.timeout_ms,
+        );
 
         Ok(Self::new(AgentLoopParts {
             llm,
@@ -164,6 +183,7 @@ impl AgentLoop<LlmClient> {
             tokenizer,
             budget,
             session,
+            subagent_pool,
         }))
     }
 }
@@ -199,6 +219,7 @@ impl<L> AgentLoop<L> {
             messages: Vec::new(),
             system_prompt,
             tool_definitions,
+            subagent_pool: parts.subagent_pool,
             model_name: parts.model_name,
             layer_tokens,
             max_tool_rounds: MAX_TOOL_ROUNDS,
@@ -218,7 +239,7 @@ impl<L> AgentLoop<L> {
 
 impl<L> AgentLoop<L>
 where
-    L: CompletionClient,
+    L: CompletionClient + Clone + 'static,
 {
     /// Run one human input turn.
     ///
@@ -346,12 +367,7 @@ where
                 "results": [],
                 "trust": "untrusted_web"
             })),
-            "spawn" => Ok(json!({
-                "ok": true,
-                "message": "subagent not implemented yet",
-                "findings": [],
-                "open_questions": []
-            })),
+            "spawn" => self.dispatch_spawn(call).await,
             "execute" => Ok(json!({
                 "ok": true,
                 "message": "execution not implemented yet"
@@ -558,6 +574,52 @@ where
             "match_id": args.match_id,
             "text": text
         }))
+    }
+
+    async fn dispatch_spawn(&self, call: &ToolCall) -> std::result::Result<Value, String> {
+        let args: SpawnArgs = parse_args(call)?;
+
+        // Parse the role
+        let role = match args.role.as_str() {
+            "doc_explorer" => SubagentRole::DocExplorer,
+            "risk_reviewer" => SubagentRole::RiskReviewer,
+            _ => return Err(format!("invalid role: {}", args.role)),
+        };
+
+        // Create the spawn request
+        let request = SpawnRequest {
+            role,
+            goal: args.goal,
+            input: args.input,
+            allowed_tools: args.allowed_tools,
+            context_tokens: args.context_tokens,
+            thinking_budget: args.thinking_budget,
+            timeout_ms: args.timeout_ms,
+            output_schema: args.output_schema,
+        };
+
+        // Execute the subagent
+        match self
+            .subagent_pool
+            .spawn(
+                request,
+                &self.llm,
+                &self.model_name,
+                self.budget.subagent_context(),
+                Arc::clone(&self.tokenizer),
+            )
+            .await
+        {
+            Ok(result) => Ok(json!({
+                "ok": true,
+                "subagent_id": result.subagent_id,
+                "status": result.status,
+                "findings": result.findings,
+                "candidate_fragments": result.candidate_fragments,
+                "open_questions": result.open_questions
+            })),
+            Err(error) => Err(error.to_string()),
+        }
     }
 
     fn finish_proposal(&mut self, proposal: CommandProposal) -> Result<TurnResult> {
@@ -903,6 +965,18 @@ struct DocExpandAroundArgs {
     after: usize,
 }
 
+#[derive(Debug, Deserialize)]
+struct SpawnArgs {
+    role: String,
+    goal: String,
+    input: Value,
+    allowed_tools: Vec<String>,
+    context_tokens: usize,
+    thinking_budget: Option<u32>,
+    timeout_ms: u64,
+    output_schema: String,
+}
+
 fn default_context_lines() -> usize {
     2
 }
@@ -1044,7 +1118,17 @@ fn summarize_tool_value(tool: &str, value: &Value) -> String {
             format!("returned {bytes} bytes")
         }
         "web_search" => "search not implemented yet".to_owned(),
-        "spawn" => "subagent not implemented yet".to_owned(),
+        "spawn" => {
+            let status = value
+                .get("status")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown");
+            let findings_count = value
+                .get("findings")
+                .and_then(Value::as_array)
+                .map_or(0, Vec::len);
+            format!("subagent {} ({} findings)", status, findings_count)
+        }
         "execute" => "execution not implemented yet".to_owned(),
         _ => "completed".to_owned(),
     }
@@ -1231,6 +1315,25 @@ mod tests {
                 Ok(response)
             })
         }
+
+        fn complete<'a>(
+            &'a self,
+            request: &'a ChatRequest,
+        ) -> Pin<Box<dyn Future<Output = cps_llm::Result<ChatResponse>> + Send + 'a>> {
+            Box::pin(async move {
+                self.requests
+                    .lock()
+                    .expect("mock request lock")
+                    .push(request.clone());
+                let response = self
+                    .responses
+                    .lock()
+                    .expect("mock response lock")
+                    .pop_front()
+                    .expect("mock response queued");
+                Ok(response)
+            })
+        }
     }
 
     fn loop_with(responses: Vec<ChatResponse>) -> AgentLoop<MockLlm> {
@@ -1265,6 +1368,7 @@ mod tests {
             tokenizer: Arc::new(FallbackTokenizer::new()),
             budget,
             session,
+            subagent_pool: SubagentPool::new(2, 60000),
         })
     }
 
