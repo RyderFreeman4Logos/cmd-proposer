@@ -7,6 +7,7 @@
 use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 
 use cps_budget::{BudgetEngine, Layer};
@@ -29,7 +30,7 @@ use crate::budget::{
 };
 use crate::message_manager::MessageManager;
 use crate::session::SessionInit;
-use crate::subagent::{SubagentPool, SpawnRequest, SubagentRole};
+use crate::subagent::{SpawnRequest, SubagentPool, SubagentRole};
 
 const MAX_TOOL_ROUNDS: usize = 8;
 const DOC_EXPLORER_ROLE: &str = "doc_explorer";
@@ -62,6 +63,22 @@ pub struct LayerTokenUsage {
     pub layer1_conversation: usize,
     pub layer2_evidence: usize,
     pub layer3_temp_output: usize,
+}
+
+/// Shared atomic counters for live token display.
+///
+/// The streaming callback increments `main_output_tokens` with tokenizer-counted
+/// tokens from each delta. After each LLM call, `main_completion_tokens` is
+/// updated from the server's `usage` block (includes thinking). Context window
+/// size is updated from `usage.prompt_tokens`.
+#[derive(Debug, Default)]
+pub struct TokenCounters {
+    pub main_output_tokens: AtomicU64,
+    pub main_completion_tokens: AtomicU64,
+    pub subagent_output_tokens: AtomicU64,
+    pub subagent_completion_tokens: AtomicU64,
+    pub context_tokens: AtomicU64,
+    pub main_retries: AtomicU64,
 }
 
 /// Error type for the agent loop.
@@ -148,6 +165,7 @@ pub struct AgentLoop<L = LlmClient> {
     max_tool_rounds: usize,
     transient_retries: u32,
     retry_delay: std::time::Duration,
+    counters: Arc<TokenCounters>,
 }
 
 /// Dependencies needed to construct an [`AgentLoop`].
@@ -163,6 +181,7 @@ pub struct AgentLoopParts<L> {
     pub subagent_pool: SubagentPool,
     pub transient_retries: u32,
     pub retry_delay_ms: u64,
+    pub counters: Option<Arc<TokenCounters>>,
 }
 
 impl AgentLoop<LlmClient> {
@@ -192,6 +211,7 @@ impl AgentLoop<LlmClient> {
             subagent_pool,
             transient_retries: config.runtime.transient_retries,
             retry_delay_ms: config.runtime.retry_delay_ms,
+            counters: None,
         }))
     }
 }
@@ -214,11 +234,11 @@ impl<L> AgentLoop<L> {
             layer_usage: budget_tracker.layer_usage.clone(),
             suggestions: Vec::new(),
         });
-        let message_manager = MessageManager::new(
-            Arc::clone(&tokenizer),
-            &system_prompt,
-            &tool_definitions,
-        );
+        let message_manager =
+            MessageManager::new(Arc::clone(&tokenizer), &system_prompt, &tool_definitions);
+        let counters = parts
+            .counters
+            .unwrap_or_else(|| Arc::new(TokenCounters::default()));
 
         Self {
             state: AgentState::Idle,
@@ -239,6 +259,7 @@ impl<L> AgentLoop<L> {
             max_tool_rounds: MAX_TOOL_ROUNDS,
             transient_retries: parts.transient_retries,
             retry_delay: std::time::Duration::from_millis(parts.retry_delay_ms),
+            counters,
         }
     }
 
@@ -250,6 +271,11 @@ impl<L> AgentLoop<L> {
     #[must_use]
     pub fn layer_budget(&self, layer: Layer) -> usize {
         self.budget.layer(layer)
+    }
+
+    #[must_use]
+    pub fn counters(&self) -> &Arc<TokenCounters> {
+        &self.counters
     }
 }
 
@@ -306,7 +332,10 @@ where
             // no tool calls on the first pass. Nudge them to use tools rather
             // than giving up immediately.
             if assistant.content.trim().is_empty() && round < self.max_tool_rounds - 1 {
-                tracing::warn!(round, "model returned empty content without tool calls — nudging");
+                tracing::warn!(
+                    round,
+                    "model returned empty content without tool calls — nudging"
+                );
                 self.append_user_message(
                     "You must use the available tools to explore documentation. \
                      Call read_help, doc_grep, or another tool now.",
@@ -711,19 +740,43 @@ where
         &self,
         request: &ChatRequest,
     ) -> std::result::Result<cps_llm::ChatResponse, cps_llm::LlmError> {
+        let tokenizer = Arc::clone(&self.tokenizer);
+        let counters = Arc::clone(&self.counters);
         for attempt in 0..=self.transient_retries {
+            let tok = Arc::clone(&tokenizer);
+            let ctr = Arc::clone(&counters);
             let result = self
                 .llm
-                .complete_streaming(request, |chunk| {
+                .complete_streaming(request, move |chunk| {
                     if let Some(delta) = &chunk.delta_content {
-                        tracing::trace!(bytes = delta.len(), "streaming assistant delta");
+                        let n = tok.count_tokens(delta) as u64;
+                        ctr.main_output_tokens.fetch_add(n, Ordering::Relaxed);
+                    }
+                    if let Some(tool_deltas) = &chunk.delta_tool_calls {
+                        for td in tool_deltas {
+                            if let Some(args) = &td.function_arguments_delta {
+                                let n = tok.count_tokens(args) as u64;
+                                ctr.main_output_tokens.fetch_add(n, Ordering::Relaxed);
+                            }
+                        }
                     }
                 })
                 .await;
             match result {
-                Ok(resp) => return Ok(resp),
+                Ok(resp) => {
+                    if let Some(usage) = &resp.usage {
+                        counters
+                            .main_completion_tokens
+                            .fetch_add(u64::from(usage.completion_tokens), Ordering::Relaxed);
+                        counters
+                            .context_tokens
+                            .store(u64::from(usage.prompt_tokens), Ordering::Relaxed);
+                    }
+                    return Ok(resp);
+                }
                 Err(e) if e.is_transient() && attempt < self.transient_retries => {
-                    tracing::warn!(
+                    counters.main_retries.fetch_add(1, Ordering::Relaxed);
+                    tracing::debug!(
                         attempt,
                         max = self.transient_retries,
                         delay_ms = self.retry_delay.as_millis() as u64,
@@ -1440,6 +1493,7 @@ mod tests {
             subagent_pool: SubagentPool::new(2, 60000),
             transient_retries: 2,
             retry_delay_ms: 100,
+            counters: None,
         })
     }
 

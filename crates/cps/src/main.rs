@@ -3,17 +3,19 @@ use std::io::{self, Write as IoWrite};
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::process::ExitCode;
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use cps_agent::{AgentLoop, TurnResult};
+use cps_agent::{AgentLoop, TokenCounters, TurnResult};
 use cps_config::{
     ApprovalConfig, Config, DocRunnerConfig, DocStoreConfig, ExecutionRunnerConfig, ModelConfig,
     ProposalConfig, RiskConfig, RuntimeConfig, SearchConfig, SubagentsConfig, ThinkingConfig,
     TokenizerConfig,
 };
 use cps_proposal::{CommandProposal, EvidenceKind, Risk};
-use tokio::io::{AsyncBufReadExt, BufReader, Lines, Stdin};
+use rustyline::error::ReadlineError;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -89,14 +91,19 @@ async fn run() -> Result<()> {
 
     let config = load_runtime_config(&cli)?;
     let mut agent = AgentLoop::from_config(&config).context("failed to initialize agent loop")?;
+    let counters = Arc::clone(agent.counters());
 
     if let Some(intent) = cli.intent_text() {
         let mut stdout = io::stdout();
-        run_non_interactive(&mut agent, &intent, &mut stdout).await?;
+        let display_handle = spawn_token_display(Arc::clone(&counters));
+        let result = run_non_interactive(&mut agent, &intent, &mut stdout).await;
+        display_handle.abort();
+        clear_token_display_line();
+        result?;
         return Ok(());
     }
 
-    run_interactive(agent, &config).await
+    run_interactive(agent, &config, counters).await
 }
 
 fn init_tracing() {
@@ -135,20 +142,53 @@ where
     Ok(())
 }
 
-async fn run_interactive(mut agent: AgentLoop, config: &Config) -> Result<()> {
+fn spawn_token_display(counters: Arc<TokenCounters>) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_millis(100));
+        loop {
+            interval.tick().await;
+            let main_out = counters.main_output_tokens.load(Ordering::Relaxed);
+            let main_comp = counters.main_completion_tokens.load(Ordering::Relaxed);
+            let sub_out = counters.subagent_output_tokens.load(Ordering::Relaxed);
+            let sub_comp = counters.subagent_completion_tokens.load(Ordering::Relaxed);
+            let ctx = counters.context_tokens.load(Ordering::Relaxed);
+            let retries = counters.main_retries.load(Ordering::Relaxed);
+            if main_out == 0 && main_comp == 0 && sub_out == 0 && ctx == 0 && retries == 0 {
+                continue;
+            }
+            let main_display = main_out.max(main_comp);
+            let sub_display = sub_out.max(sub_comp);
+            let retry_suffix = if retries > 0 {
+                format!(" | retry: {retries}")
+            } else {
+                String::new()
+            };
+            eprint!(
+                "\r\x1b[K\x1b[2m tokens \x1b[0m main: {main_display} | sub: {sub_display} | ctx: {ctx}{retry_suffix}  "
+            );
+        }
+    })
+}
+
+fn clear_token_display_line() {
+    eprint!("\r\x1b[K");
+}
+
+async fn run_interactive(
+    mut agent: AgentLoop,
+    config: &Config,
+    counters: Arc<TokenCounters>,
+) -> Result<()> {
     println!("cps {}", env!("CARGO_PKG_VERSION"));
     println!("Enter an intent. Ctrl+C or q exits.");
 
-    let stdin = tokio::io::stdin();
-    let mut lines = BufReader::new(stdin).lines();
+    let mut rl = rustyline::DefaultEditor::new().context("failed to initialize line editor")?;
 
     loop {
-        print!("cps> ");
-        io::stdout().flush()?;
-
-        let Some(input) = read_line_or_interrupt(&mut lines).await? else {
-            println!();
-            return Ok(());
+        let input = match rl.readline("cps> ") {
+            Ok(line) => line,
+            Err(ReadlineError::Interrupted | ReadlineError::Eof) => return Ok(()),
+            Err(e) => return Err(e.into()),
         };
         let input = input.trim();
         if input.is_empty() {
@@ -157,41 +197,38 @@ async fn run_interactive(mut agent: AgentLoop, config: &Config) -> Result<()> {
         if input == "q" {
             return Ok(());
         }
+        let _ = rl.add_history_entry(input);
 
-        let Some(result) = run_turn_or_interrupt(&mut agent, input).await? else {
+        let display_handle = spawn_token_display(Arc::clone(&counters));
+        let result = run_turn_or_interrupt(&mut agent, input).await;
+        display_handle.abort();
+        clear_token_display_line();
+
+        let Some(result) = result? else {
             println!();
             return Ok(());
         };
 
         if let Some(proposal) = result.proposal {
             println!("{}", format_proposal_plain(&proposal));
-            match prompt_review(&mut lines).await? {
-                ReviewChoice::Accept => {
+            let review = match rl.readline("Accept proposal? [y/n/q] ") {
+                Ok(line) => line,
+                Err(ReadlineError::Interrupted | ReadlineError::Eof) => return Ok(()),
+                Err(e) => return Err(e.into()),
+            };
+            match review.trim() {
+                "y" | "Y" => {
                     if config.approval.execute_enabled {
                         println!("Accepted. Execution runner is not available in v0.1; command was not executed.");
                     } else {
                         println!("Accepted. Execution is disabled; command was not executed.");
                     }
                 }
-                ReviewChoice::Reject => {
-                    println!("Rejected. Enter a revised intent.");
-                }
-                ReviewChoice::Quit => return Ok(()),
+                "q" | "Q" => return Ok(()),
+                _ => println!("Rejected. Enter a revised intent."),
             }
         } else if result.needs_input {
             println!("No command proposal yet. Enter more detail or q to quit.");
-        }
-    }
-}
-
-async fn read_line_or_interrupt(lines: &mut Lines<BufReader<Stdin>>) -> Result<Option<String>> {
-    tokio::select! {
-        signal = tokio::signal::ctrl_c() => {
-            signal.context("failed to listen for Ctrl+C")?;
-            Ok(None)
-        }
-        line = lines.next_line() => {
-            line.context("failed to read stdin")
         }
     }
 }
@@ -204,30 +241,6 @@ async fn run_turn_or_interrupt(agent: &mut AgentLoop, input: &str) -> Result<Opt
         }
         result = agent.run_turn(input) => {
             Ok(Some(result?))
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ReviewChoice {
-    Accept,
-    Reject,
-    Quit,
-}
-
-async fn prompt_review(lines: &mut Lines<BufReader<Stdin>>) -> Result<ReviewChoice> {
-    loop {
-        print!("Accept proposal? [y/n/q] ");
-        io::stdout().flush()?;
-
-        let Some(input) = read_line_or_interrupt(lines).await? else {
-            return Ok(ReviewChoice::Quit);
-        };
-        match input.trim() {
-            "y" | "Y" => return Ok(ReviewChoice::Accept),
-            "n" | "N" => return Ok(ReviewChoice::Reject),
-            "q" | "Q" => return Ok(ReviewChoice::Quit),
-            _ => println!("Enter y, n, or q."),
         }
     }
 }
