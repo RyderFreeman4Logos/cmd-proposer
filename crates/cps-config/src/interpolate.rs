@@ -71,10 +71,15 @@ where
             },
         }
     });
-    if let Some(e) = error { return Err(e); }
+    if let Some(e) = error {
+        return Err(e);
+    }
     let result = out.into_owned();
     if let Some(pos) = result.find("${") {
-        let end = result[pos..].find('}').map(|i| pos + i + 1).unwrap_or(result.len().min(pos + 30));
+        let end = result[pos..]
+            .find('}')
+            .map(|i| pos + i + 1)
+            .unwrap_or(result.len().min(pos + 30));
         return Err(InterpolateError::Malformed(result[pos..end].to_string()));
     }
     Ok(result)

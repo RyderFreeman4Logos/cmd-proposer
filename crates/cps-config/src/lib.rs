@@ -11,7 +11,7 @@ mod init;
 mod interpolate;
 mod load;
 
-pub use init::{minimal_template, full_template};
+pub use init::{full_template, minimal_template};
 pub use interpolate::{interpolate_env, InterpolateError};
 pub use load::{load, load_from_path, ConfigSource, LoadError};
 
@@ -55,7 +55,9 @@ pub struct Config {
     pub risk: RiskConfig,
 }
 
-fn default_version() -> u32 { 1 }
+fn default_version() -> u32 {
+    1
+}
 
 // ---------- model ----------
 
@@ -74,8 +76,12 @@ pub struct ModelConfig {
     pub tokenizer: TokenizerConfig,
 }
 
-fn default_provider() -> String { "local_openai_compatible".into() }
-fn default_max_context_tokens() -> u32 { 200_000 }
+fn default_provider() -> String {
+    "local_openai_compatible".into()
+}
+fn default_max_context_tokens() -> u32 {
+    200_000
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TokenizerConfig {
@@ -85,7 +91,9 @@ pub struct TokenizerConfig {
     pub tokenizer_type: String,
 }
 
-fn default_tokenizer_type() -> String { "huggingface_tokenizer_json".into() }
+fn default_tokenizer_type() -> String {
+    "huggingface_tokenizer_json".into()
+}
 
 // ---------- thinking ----------
 
@@ -98,8 +106,12 @@ pub struct ThinkingConfig {
     pub subagent_default: u32,
 }
 
-fn default_main_agent_thinking() -> u32 { 32_768 }
-fn default_subagent_thinking() -> u32 { 4_096 }
+fn default_main_agent_thinking() -> u32 {
+    32_768
+}
+fn default_subagent_thinking() -> u32 {
+    4_096
+}
 
 impl Default for ThinkingConfig {
     fn default() -> Self {
@@ -124,9 +136,15 @@ pub struct RuntimeConfig {
     pub ui_progress_interval_ms: u64,
 }
 
-fn default_global_timeout_ms() -> u64 { 1_200_000 }
-fn default_request_timeout_ms() -> u64 { 1_200_000 }
-fn default_ui_progress_interval_ms() -> u64 { 5_000 }
+fn default_global_timeout_ms() -> u64 {
+    1_200_000
+}
+fn default_request_timeout_ms() -> u64 {
+    1_200_000
+}
+fn default_ui_progress_interval_ms() -> u64 {
+    5_000
+}
 
 impl Default for RuntimeConfig {
     fn default() -> Self {
@@ -155,8 +173,12 @@ pub struct SearchConfig {
     pub redaction_rules: Vec<String>,
 }
 
-fn default_search_enabled() -> bool { true }
-fn default_redact_queries() -> bool { true }
+fn default_search_enabled() -> bool {
+    true
+}
+fn default_redact_queries() -> bool {
+    true
+}
 
 fn default_search_providers() -> Vec<SearchProvider> {
     vec![SearchProvider {
@@ -206,8 +228,12 @@ pub struct SearchProvider {
     pub max_results: u32,
 }
 
-fn default_provider_timeout_ms() -> u64 { 60_000 }
-fn default_provider_max_results() -> u32 { 8 }
+fn default_provider_timeout_ms() -> u64 {
+    60_000
+}
+fn default_provider_max_results() -> u32 {
+    8
+}
 
 // ---------- doc_runner ----------
 
@@ -226,11 +252,20 @@ pub struct DocRunnerConfig {
 
     #[serde(default = "default_allow_doc_actions")]
     pub allow_doc_actions: Vec<String>,
+
+    #[serde(default)]
+    pub extra_bind_ro: Vec<String>,
 }
 
-fn default_sandbox() -> String { "bwrap".into() }
-fn default_doc_runner_timeout_ms() -> u64 { 60_000 }
-fn default_doc_runner_max_output_bytes() -> u64 { 10_485_760 }
+fn default_sandbox() -> String {
+    "bwrap".into()
+}
+fn default_doc_runner_timeout_ms() -> u64 {
+    60_000
+}
+fn default_doc_runner_max_output_bytes() -> u64 {
+    10_485_760
+}
 fn default_allow_doc_actions() -> Vec<String> {
     vec!["help".into(), "man".into(), "info".into()]
 }
@@ -249,8 +284,12 @@ pub struct DocStoreConfig {
     pub cache_dir: String,
 }
 
-fn default_true() -> bool { true }
-fn default_doc_cache_dir() -> String { "~/.cache/cmd-proposer/docs".into() }
+fn default_true() -> bool {
+    true
+}
+fn default_doc_cache_dir() -> String {
+    "~/.cache/cmd-proposer/docs".into()
+}
 
 impl Default for DocStoreConfig {
     fn default() -> Self {
@@ -279,8 +318,12 @@ pub struct SubagentsConfig {
     pub kill_on_main_cancel: bool,
 }
 
-fn default_subagents_max_parallel() -> u32 { 12 }
-fn default_subagents_timeout_ms() -> u64 { 1_200_000 }
+fn default_subagents_max_parallel() -> u32 {
+    12
+}
+fn default_subagents_timeout_ms() -> u64 {
+    1_200_000
+}
 
 impl Default for SubagentsConfig {
     fn default() -> Self {
@@ -304,7 +347,9 @@ pub struct ProposalConfig {
     pub require_preflight_for_medium_plus: bool,
 }
 
-fn default_output_language() -> String { "zh-CN".into() }
+fn default_output_language() -> String {
+    "zh-CN".into()
+}
 
 impl Default for ProposalConfig {
     fn default() -> Self {
@@ -343,11 +388,15 @@ pub struct ExecutionRunnerConfig {
     pub audit_log: String,
 }
 
-fn default_audit_log() -> String { "~/.local/state/cmd-proposer/audit.log".into() }
+fn default_audit_log() -> String {
+    "~/.local/state/cmd-proposer/audit.log".into()
+}
 
 impl Default for ExecutionRunnerConfig {
     fn default() -> Self {
-        Self { audit_log: default_audit_log() }
+        Self {
+            audit_log: default_audit_log(),
+        }
     }
 }
 
@@ -364,8 +413,8 @@ pub struct RiskConfig {
 
 fn default_high_risk_tokens() -> Vec<String> {
     [
-        "delete", "destroy", "apply", "replace", "patch", "restart",
-        "scale", "drain", "uncordon", "stop", "disable", "rm", "prune", "force",
+        "delete", "destroy", "apply", "replace", "patch", "restart", "scale", "drain", "uncordon",
+        "stop", "disable", "rm", "prune", "force",
     ]
     .iter()
     .map(|s| (*s).to_string())
@@ -458,7 +507,10 @@ doc_runner:
         assert_eq!(cfg.version, 1);
         assert_eq!(cfg.model.provider, "local_openai_compatible");
         assert_eq!(cfg.model.max_context_tokens, 200_000);
-        assert_eq!(cfg.model.tokenizer.tokenizer_type, "huggingface_tokenizer_json");
+        assert_eq!(
+            cfg.model.tokenizer.tokenizer_type,
+            "huggingface_tokenizer_json"
+        );
         assert_eq!(cfg.thinking.main_agent, 32_768);
         assert_eq!(cfg.thinking.subagent_default, 4_096);
         assert_eq!(cfg.runtime.global_timeout_ms, 1_200_000);
@@ -475,6 +527,7 @@ doc_runner:
             cfg.doc_runner.allow_doc_actions,
             vec!["help".to_string(), "man".into(), "info".into()]
         );
+        assert!(cfg.doc_runner.extra_bind_ro.is_empty());
         assert!(cfg.doc_store.keep_raw_in_memory);
         assert!(cfg.subagents.enabled);
         assert_eq!(cfg.subagents.max_parallel, 12);
@@ -493,7 +546,10 @@ doc_runner:
 "#;
         let err = serde_yaml::from_str::<Config>(yaml).unwrap_err();
         let msg = err.to_string();
-        assert!(msg.contains("model"), "error should mention `model`, got: {msg}");
+        assert!(
+            msg.contains("model"),
+            "error should mention `model`, got: {msg}"
+        );
     }
 
     #[test]
@@ -508,7 +564,10 @@ model:
 "#;
         let err = serde_yaml::from_str::<Config>(yaml).unwrap_err();
         let msg = err.to_string();
-        assert!(msg.contains("doc_runner"), "error should mention `doc_runner`, got: {msg}");
+        assert!(
+            msg.contains("doc_runner"),
+            "error should mention `doc_runner`, got: {msg}"
+        );
     }
 
     #[test]
@@ -526,7 +585,10 @@ doc_runner:
 "#;
         let cfg: Config = serde_yaml::from_str(yaml).unwrap();
         let err = cfg.validate().unwrap_err();
-        assert!(matches!(err, ValidateError::EmptyRequired("doc_runner.allow_programs")));
+        assert!(matches!(
+            err,
+            ValidateError::EmptyRequired("doc_runner.allow_programs")
+        ));
     }
 
     #[test]

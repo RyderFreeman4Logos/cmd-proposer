@@ -75,6 +75,7 @@ doc_runner:
   # timeout_ms: 60000                         # default: 60000
   # max_output_bytes: 10485760                # default: 10MB
   # allow_doc_actions: [help, man, info]      # default: [help, man, info]
+  # extra_bind_ro: []                         # additional host paths to bind read-only
 
 # doc_store:
 #   keep_raw_in_memory: true                  # default: true
@@ -122,23 +123,23 @@ mod tests {
     #[test]
     fn minimal_template_is_valid_yaml() {
         let env = fake_env();
-        let resolved = interpolate_with(minimal_template(), |k| {
-            env.get(k).map(|s| (*s).to_string())
-        })
-        .expect("interpolate");
+        let resolved =
+            interpolate_with(minimal_template(), |k| env.get(k).map(|s| (*s).to_string()))
+                .expect("interpolate");
         let cfg: Config = serde_yaml::from_str(&resolved).expect("parse minimal");
         cfg.validate().expect("validate minimal");
         assert_eq!(cfg.model.base_url, "http://localhost:8317/v1");
-        assert!(cfg.doc_runner.allow_programs.contains(&"kubectl".to_string()));
+        assert!(cfg
+            .doc_runner
+            .allow_programs
+            .contains(&"kubectl".to_string()));
     }
 
     #[test]
     fn full_template_is_valid_yaml() {
         let env = fake_env();
-        let resolved = interpolate_with(full_template(), |k| {
-            env.get(k).map(|s| (*s).to_string())
-        })
-        .expect("interpolate");
+        let resolved = interpolate_with(full_template(), |k| env.get(k).map(|s| (*s).to_string()))
+            .expect("interpolate");
         let cfg: Config = serde_yaml::from_str(&resolved).expect("parse full");
         cfg.validate().expect("validate full");
         // Defaults survived the commented-out sections.
