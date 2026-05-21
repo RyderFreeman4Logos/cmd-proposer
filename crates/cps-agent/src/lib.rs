@@ -4,6 +4,7 @@
 //! main conversation runtime ([`AgentLoop`]).
 
 pub mod agent_loop;
+pub mod budget;
 pub mod session;
 pub mod system_prompt;
 pub mod tools;
@@ -12,5 +13,6 @@ pub use agent_loop::{
     AgentError, AgentLoop, AgentLoopParts, AgentState, CompletionClient, LayerTokenUsage, Result,
     TurnResult,
 };
+pub use budget::{BudgetStatus, BudgetTracker};
 pub use session::SessionInit;
 pub use tools::ToolFeatureFlags;
