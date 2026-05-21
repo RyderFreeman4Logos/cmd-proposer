@@ -140,6 +140,12 @@ pub struct ChatRequest {
     /// Optional sampling temperature (0.0..=2.0). Most providers default to 1.0.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f32>,
+
+    /// Controls whether the model must/may/must-not call tools.
+    /// `"auto"` (default for most providers), `"none"`, `"required"`,
+    /// or `{"type":"function","function":{"name":"..."}}`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_choice: Option<serde_json::Value>,
 }
 
 impl ChatRequest {
@@ -152,6 +158,7 @@ impl ChatRequest {
             max_completion_tokens: None,
             stream: false,
             temperature: None,
+            tool_choice: None,
         }
     }
 }

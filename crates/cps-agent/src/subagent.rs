@@ -325,7 +325,8 @@ where
         tools: Some(build_tool_subset(&request.allowed_tools)),
         max_completion_tokens: Some(thinking_budget),
         stream: false,
-        temperature: Some(0.1), // Lower temperature for more focused responses
+        temperature: Some(0.1),
+        tool_choice: Some(serde_json::Value::String("auto".to_owned())),
     };
 
     // Execute the LLM call
