@@ -27,3 +27,7 @@ cps-ui.workspace = true
 
 clap.workspace = true
 anyhow.workspace = true
+tokio.workspace = true
+tracing-subscriber.workspace = true
+dotenvy.workspace = true
+dirs.workspace = true
