@@ -657,6 +657,7 @@ where
                 &self.model_name,
                 self.budget.subagent_context(),
                 Arc::clone(&self.tokenizer),
+                Arc::clone(&self.counters),
             )
             .await
         {

@@ -25,7 +25,7 @@ if [ "${ahead_count}" = "0" ]; then
     exit 0
 fi
 
-current_version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)"
+current_version="$(git show HEAD:Cargo.toml | sed -n 's/^version = "\(.*\)"/\1/p' | head -n 1)"
 base_version="$(git show "${base_ref}:Cargo.toml" | sed -n 's/^version = "\(.*\)"/\1/p' | head -n 1)"
 
 if [ -z "${current_version}" ] || [ -z "${base_version}" ]; then
