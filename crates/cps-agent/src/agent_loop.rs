@@ -277,14 +277,7 @@ where
             };
 
             let request = self.chat_request()?;
-            let response = self
-                .llm
-                .complete_streaming(&request, |chunk| {
-                    if let Some(delta) = &chunk.delta_content {
-                        tracing::trace!(bytes = delta.len(), "streaming assistant delta");
-                    }
-                })
-                .await?;
+            let response = self.llm_call_with_retry(&request).await?;
 
             let assistant = response.message;
             self.append_assistant_message(assistant.clone());
@@ -704,6 +697,34 @@ where
         self.message_manager.add_message(msg.clone());
         self.messages.push(msg);
         self.refresh_budget_usage();
+    }
+
+    const MAX_TRANSIENT_RETRIES: u32 = 2;
+
+    async fn llm_call_with_retry(
+        &self,
+        request: &ChatRequest,
+    ) -> std::result::Result<cps_llm::ChatResponse, cps_llm::LlmError> {
+        for attempt in 0..=Self::MAX_TRANSIENT_RETRIES {
+            let result = self
+                .llm
+                .complete_streaming(request, |chunk| {
+                    if let Some(delta) = &chunk.delta_content {
+                        tracing::trace!(bytes = delta.len(), "streaming assistant delta");
+                    }
+                })
+                .await;
+            match result {
+                Ok(resp) => return Ok(resp),
+                Err(e) if e.is_transient() && attempt < Self::MAX_TRANSIENT_RETRIES => {
+                    let delay = 1u64 << attempt; // 1s, 2s
+                    tracing::warn!(attempt, delay_s = delay, %e, "transient LLM error, retrying");
+                    tokio::time::sleep(std::time::Duration::from_secs(delay)).await;
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        unreachable!()
     }
 
     fn chat_request(&mut self) -> Result<ChatRequest> {
