@@ -13,7 +13,6 @@
 //! without re-running the regex.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 
 use cps_tokenizer::Tokenizer;
@@ -149,7 +148,6 @@ struct Inner {
 #[derive(Debug, Clone, Default)]
 pub struct DocStore {
     inner: Arc<RwLock<Inner>>,
-    match_counter: Arc<AtomicU64>,
 }
 
 impl DocStore {
@@ -186,6 +184,11 @@ impl DocStore {
         };
         let meta = doc.meta(&doc_id);
         let mut guard = self.inner.write().expect("DocStore lock poisoned");
+        // Replacing a doc invalidates any prior grep handles into it — their
+        // line numbers may now point past EOF and `doc_expand_around` would
+        // panic on the resulting empty slice. Drop all stale matches for this
+        // doc_id before swapping the body in.
+        guard.matches.retain(|_, pos| pos.doc_id != doc_id);
         guard.docs.insert(doc_id, doc);
         meta
     }
@@ -228,7 +231,9 @@ impl DocStore {
         let mut out = String::new();
         let mut used = 0usize;
         for line in doc.raw_text.split_inclusive('\n') {
-            let next = tokenizer.count_tokens(line).max(if line.is_empty() { 0 } else { 1 });
+            let next = tokenizer
+                .count_tokens(line)
+                .max(if line.is_empty() { 0 } else { 1 });
             if used + next > max_tokens {
                 break;
             }
@@ -246,8 +251,10 @@ impl DocStore {
     ///
     /// Each returned [`GrepMatch::match_id`] is registered internally so a
     /// later [`DocStore::doc_expand_around`] call can find the same line
-    /// without re-running the regex. Match IDs are globally unique within
-    /// a `DocStore` instance.
+    /// without re-running the regex. Match IDs are deterministic — derived
+    /// from `doc_id`, the matched line number, and the 0-based index in
+    /// this result set — so re-running the same grep on an unchanged doc
+    /// returns the same IDs (SPEC §4.2 deterministic-results contract).
     pub fn doc_grep(
         &self,
         doc_id: &str,
@@ -296,8 +303,8 @@ impl DocStore {
 
         let mut out = Vec::with_capacity(hits.len());
         let mut guard = self.inner.write().expect("DocStore lock poisoned");
-        for (line_number, line_text) in hits {
-            let match_id = self.next_match_id();
+        for (index, (line_number, line_text)) in hits.into_iter().enumerate() {
+            let match_id = format!("{doc_id}:L{line_number}:I{index}");
             let (before, after) = window_context(&lines, line_number, context_lines);
             guard.matches.insert(
                 match_id.clone(),
@@ -352,7 +359,10 @@ impl DocStore {
             .ok_or_else(|| DocStoreError::DocNotFound(doc_id.to_string()))?;
 
         let lines: Vec<&str> = doc.raw_text.lines().collect();
-        let Some(start) = lines.iter().position(|l| is_heading(l) && regex.is_match(l)) else {
+        let Some(start) = lines
+            .iter()
+            .position(|l| is_heading(l) && regex.is_match(l))
+        else {
             return Ok(String::new());
         };
         let end = lines
@@ -367,7 +377,9 @@ impl DocStore {
         let mut used = 0usize;
         for line in &lines[start..end] {
             let chunk = format!("{}\n", line);
-            let next = tokenizer.count_tokens(&chunk).max(if chunk.trim().is_empty() { 0 } else { 1 });
+            let next = tokenizer
+                .count_tokens(&chunk)
+                .max(if chunk.trim().is_empty() { 0 } else { 1 });
             if max_tokens > 0 && used + next > max_tokens {
                 break;
             }
@@ -442,10 +454,6 @@ impl DocStore {
         }
         Ok(out)
     }
-
-    fn next_match_id(&self) -> String {
-        format!("m{}", self.match_counter.fetch_add(1, Ordering::Relaxed))
-    }
 }
 
 // ---------- helpers ----------
@@ -464,8 +472,14 @@ fn count_lines(s: &str) -> usize {
 fn window_context(lines: &[&str], line_number: usize, radius: usize) -> (Vec<String>, Vec<String>) {
     let idx = line_number.saturating_sub(1);
     let before_start = idx.saturating_sub(radius);
-    let after_end = idx.saturating_add(radius).saturating_add(1).min(lines.len());
-    let before = lines[before_start..idx].iter().map(|s| s.to_string()).collect();
+    let after_end = idx
+        .saturating_add(radius)
+        .saturating_add(1)
+        .min(lines.len());
+    let before = lines[before_start..idx]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
     let after = lines[(idx + 1).min(lines.len())..after_end]
         .iter()
         .map(|s| s.to_string())
@@ -492,7 +506,7 @@ fn is_heading(line: &str) -> bool {
         }
     }
     // Indented lines are body text, not headings.
-    let starts_indented = line.starts_with(|c: char| c == ' ' || c == '\t');
+    let starts_indented = line.starts_with([' ', '\t']);
     if starts_indented {
         return false;
     }
@@ -607,13 +621,18 @@ mod tests {
     fn doc_grep_case_insensitive() {
         let (store, _, _) = store_with("FOO\nBar\nfoo\n");
         let hits = store.doc_grep("d1", "foo", true, 0, 10).expect("ok");
-        assert_eq!(hits.iter().map(|h| h.line_number).collect::<Vec<_>>(), vec![1, 3]);
+        assert_eq!(
+            hits.iter().map(|h| h.line_number).collect::<Vec<_>>(),
+            vec![1, 3]
+        );
     }
 
     #[test]
     fn doc_grep_invalid_regex_errors() {
         let (store, _, _) = store_with("anything");
-        let err = store.doc_grep("d1", "(", false, 0, 10).expect_err("must error");
+        let err = store
+            .doc_grep("d1", "(", false, 0, 10)
+            .expect_err("must error");
         match err {
             DocStoreError::InvalidPattern { pattern, .. } => assert_eq!(pattern, "("),
             other => panic!("expected InvalidPattern, got {other:?}"),
@@ -711,9 +730,7 @@ OPTIONS
     #[test]
     fn doc_section_missing_heading_returns_empty() {
         let (store, tok, _) = store_with("# Foo\nbody\n");
-        let out = store
-            .doc_section("d1", "^# Bar", 1000, &tok)
-            .expect("ok");
+        let out = store.doc_section("d1", "^# Bar", 1000, &tok).expect("ok");
         assert_eq!(out, "");
     }
 
@@ -774,7 +791,10 @@ OPTIONS
         let id = &hits[0].match_id;
         let out = store.doc_expand_around("d1", id, 2, 3).expect("ok");
         let lines: Vec<&str> = out.lines().collect();
-        assert_eq!(lines, vec!["line 8", "line 9", "line 10", "line 11", "line 12", "line 13"]);
+        assert_eq!(
+            lines,
+            vec!["line 8", "line 9", "line 10", "line 11", "line 12", "line 13"]
+        );
     }
 
     #[test]
@@ -813,9 +833,61 @@ OPTIONS
         let (store, _, _) = store_with("x\ny\nx\ny\n");
         let h1 = store.doc_grep("d1", "x", false, 0, 10).expect("ok");
         let h2 = store.doc_grep("d1", "y", false, 0, 10).expect("ok");
-        let all: Vec<_> = h1.iter().chain(h2.iter()).map(|h| h.match_id.clone()).collect();
+        let all: Vec<_> = h1
+            .iter()
+            .chain(h2.iter())
+            .map(|h| h.match_id.clone())
+            .collect();
         let dedup: std::collections::HashSet<_> = all.iter().collect();
         assert_eq!(all.len(), dedup.len());
+    }
+
+    #[test]
+    fn insert_clears_stale_match_handles_for_replaced_doc() {
+        // Insert a 5-line doc, grep, then replace with a 1-line doc. The old
+        // match handle points to line 5, which no longer exists in the
+        // replacement — without clearing, doc_expand_around would panic on the
+        // empty slice. Verify the handle is rejected with MatchNotFound.
+        let store = DocStore::new();
+        let tok = FallbackTokenizer::new();
+        store.insert("d1", "L1\nL2\nL3\nL4\nL5\n", SourceKind::LocalDoc, &tok);
+        let hits = store.doc_grep("d1", "L5", false, 0, 1).expect("ok");
+        let stale_id = hits[0].match_id.clone();
+        store.insert("d1", "X\n", SourceKind::LocalDoc, &tok);
+        let err = store
+            .doc_expand_around("d1", &stale_id, 0, 0)
+            .expect_err("stale handle must error");
+        assert!(matches!(err, DocStoreError::MatchNotFound(id) if id == stale_id));
+    }
+
+    #[test]
+    fn insert_preserves_match_handles_for_other_docs() {
+        // Replacing doc "a" must NOT clear matches registered against doc "b".
+        let store = DocStore::new();
+        let tok = FallbackTokenizer::new();
+        store.insert("a", "alpha\n", SourceKind::LocalDoc, &tok);
+        store.insert("b", "beta\n", SourceKind::LocalDoc, &tok);
+        let hits = store.doc_grep("b", "beta", false, 0, 1).expect("ok");
+        let id = hits[0].match_id.clone();
+        store.insert("a", "replaced\n", SourceKind::LocalDoc, &tok);
+        let out = store
+            .doc_expand_around("b", &id, 0, 0)
+            .expect("still valid");
+        assert_eq!(out, "beta\n");
+    }
+
+    #[test]
+    fn match_ids_are_deterministic_across_calls() {
+        // SPEC §4.2: repeated identical grep calls MUST return identical
+        // match IDs so that downstream caches and audit logs are stable.
+        let (store, _, _) = store_with("alpha\nbeta\nalpha\n");
+        let h1 = store.doc_grep("d1", "alpha", false, 0, 10).expect("ok");
+        let h2 = store.doc_grep("d1", "alpha", false, 0, 10).expect("ok");
+        let ids1: Vec<_> = h1.iter().map(|h| h.match_id.clone()).collect();
+        let ids2: Vec<_> = h2.iter().map(|h| h.match_id.clone()).collect();
+        assert_eq!(ids1, ids2);
+        // Format check: "{doc_id}:L{line}:I{index}".
+        assert_eq!(ids1, vec!["d1:L1:I0".to_string(), "d1:L3:I1".to_string()]);
     }
 
     #[test]
