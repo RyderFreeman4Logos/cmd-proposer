@@ -23,6 +23,10 @@ use cps_tokenizer::{create_tokenizer, Tokenizer};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
+use crate::budget::{
+    classify_message_layer, count_message_tokens, is_evidence_message, layer_tokens, BudgetStatus,
+    BudgetTracker,
+};
 use crate::session::SessionInit;
 
 const MAX_TOOL_ROUNDS: usize = 8;
@@ -77,6 +81,9 @@ pub enum AgentError {
 
     #[error("proposal rejected by policy: {messages}")]
     ProposalRejected { messages: String },
+
+    #[error("conversation token budget exceeded after compression: {messages}")]
+    BudgetExceeded { messages: String },
 }
 
 /// Minimal LLM boundary used by [`AgentLoop`].
@@ -113,8 +120,9 @@ pub struct AgentLoop<L = LlmClient> {
     pub doc_store: Arc<RwLock<DocStore>>,
     pub doc_runner: DocRunner,
     pub policy: PolicyGate,
-    pub tokenizer: Box<dyn Tokenizer>,
+    pub tokenizer: Arc<dyn Tokenizer>,
     pub budget: BudgetEngine,
+    pub budget_tracker: BudgetTracker,
     pub messages: Vec<Message>,
     pub system_prompt: String,
     pub tool_definitions: Vec<Value>,
@@ -131,7 +139,7 @@ pub struct AgentLoopParts<L> {
     pub doc_store: Arc<RwLock<DocStore>>,
     pub doc_runner: DocRunner,
     pub policy: PolicyGate,
-    pub tokenizer: Box<dyn Tokenizer>,
+    pub tokenizer: Arc<dyn Tokenizer>,
     pub budget: BudgetEngine,
     pub session: SessionInit,
 }
@@ -142,7 +150,7 @@ impl AgentLoop<LlmClient> {
         let llm = LlmClient::new(&cps_llm::ClientConfig::from_config(config))?;
         let doc_runner = DocRunner::new(config.doc_runner.clone());
         let doc_store = Arc::new(RwLock::new(DocStore::new()));
-        let tokenizer = create_tokenizer(&config.model.tokenizer)?;
+        let tokenizer: Arc<dyn Tokenizer> = Arc::from(create_tokenizer(&config.model.tokenizer)?);
         let budget = BudgetEngine::from_config(config);
         let policy = PolicyGate::new(policy_config_from_config(config, budget));
         let session = SessionInit::from_config(config);
@@ -163,19 +171,36 @@ impl AgentLoop<LlmClient> {
 impl<L> AgentLoop<L> {
     /// Build a loop from explicit dependencies.
     pub fn new(parts: AgentLoopParts<L>) -> Self {
+        let tokenizer = parts.tokenizer;
+        let budget = parts.budget;
+        let system_prompt = parts.session.system_prompt;
+        let tool_definitions = parts.session.tool_defs;
+        let budget_tracker = BudgetTracker::new(
+            budget,
+            Arc::clone(&tokenizer),
+            &system_prompt,
+            &tool_definitions,
+        );
+        let layer_tokens = layer_token_usage_from_budget_status(&BudgetStatus {
+            within_budget: true,
+            layer_usage: budget_tracker.layer_usage.clone(),
+            suggestions: Vec::new(),
+        });
+
         Self {
             state: AgentState::Idle,
             llm: parts.llm,
             doc_store: parts.doc_store,
             doc_runner: parts.doc_runner,
             policy: parts.policy,
-            tokenizer: parts.tokenizer,
-            budget: parts.budget,
+            tokenizer,
+            budget,
+            budget_tracker,
             messages: Vec::new(),
-            system_prompt: parts.session.system_prompt,
-            tool_definitions: parts.session.tool_defs,
+            system_prompt,
+            tool_definitions,
             model_name: parts.model_name,
-            layer_tokens: LayerTokenUsage::default(),
+            layer_tokens,
             max_tool_rounds: MAX_TOOL_ROUNDS,
         }
     }
@@ -222,7 +247,7 @@ where
                 AgentState::MergeFindings
             };
 
-            let request = self.chat_request();
+            let request = self.chat_request()?;
             let response = self
                 .llm
                 .complete_streaming(&request, |chunk| {
@@ -569,18 +594,18 @@ where
     }
 
     fn append_user_message(&mut self, content: &str) {
-        self.layer_tokens.layer1_conversation += self.tokenizer.count_tokens(content);
         self.messages.push(Message::user(content));
+        self.refresh_budget_usage();
     }
 
     fn append_assistant_message(&mut self, message: Message) {
-        self.layer_tokens.layer1_conversation += self.tokenizer.count_tokens(&message.content);
         self.messages.push(message);
+        self.refresh_budget_usage();
     }
 
     fn append_tool_result(&mut self, message: &Message) {
-        self.layer_tokens.layer3_temp_output += self.tokenizer.count_tokens(&message.content);
         self.messages.push(message.clone());
+        self.refresh_budget_usage();
     }
 
     fn append_evidence_summary(&mut self, observations: &[ToolObservation]) {
@@ -589,19 +614,20 @@ where
         }
 
         let summary = evidence_summary(observations);
-        self.layer_tokens.layer2_evidence += self.tokenizer.count_tokens(&summary);
         self.messages.push(Message::assistant(summary));
+        self.refresh_budget_usage();
     }
 
-    fn chat_request(&self) -> ChatRequest {
-        ChatRequest {
+    fn chat_request(&mut self) -> Result<ChatRequest> {
+        self.enforce_budget_before_llm_request()?;
+        Ok(ChatRequest {
             model: self.model_name.clone(),
             messages: self.request_messages(),
             tools: Some(self.tool_definitions.clone()),
             max_completion_tokens: Some(self.budget.thinking_budget()),
             stream: true,
             temperature: None,
-        }
+        })
     }
 
     fn request_messages(&self) -> Vec<Message> {
@@ -609,6 +635,87 @@ where
         messages.push(Message::system(self.system_prompt.clone()));
         messages.extend(self.messages.clone());
         messages
+    }
+
+    fn enforce_budget_before_llm_request(&mut self) -> Result<()> {
+        let mut status = self.refresh_budget_usage();
+        log_budget_suggestions(&status);
+        if status.within_budget {
+            return Ok(());
+        }
+
+        tracing::warn!("conversation token budget exceeded; compressing Layer 3 tool output");
+        while !status.within_budget && self.compress_oldest_layer3_content() {
+            status = self.refresh_budget_usage();
+        }
+
+        if status.within_budget {
+            return Ok(());
+        }
+
+        tracing::warn!(
+            "conversation token budget still exceeded after Layer 3 compression; truncating oldest Layer 2 evidence"
+        );
+        while !status.within_budget && self.truncate_oldest_evidence() {
+            status = self.refresh_budget_usage();
+        }
+
+        if !status.within_budget {
+            log_budget_suggestions(&status);
+            return Err(AgentError::BudgetExceeded {
+                messages: status.suggestions.join("; "),
+            });
+        }
+
+        Ok(())
+    }
+
+    fn refresh_budget_usage(&mut self) -> BudgetStatus {
+        let status = self.budget_tracker.check_budget(&self.messages);
+        self.layer_tokens = layer_token_usage_from_budget_status(&status);
+        status
+    }
+
+    fn compress_oldest_layer3_content(&mut self) -> bool {
+        for message in &mut self.messages {
+            if classify_message_layer(message) != Layer::Layer3TempOutput
+                || message
+                    .content
+                    .starts_with("Layer 3 compressed tool output:")
+            {
+                continue;
+            }
+
+            let original_tokens = count_message_tokens(self.tokenizer.as_ref(), message);
+            let compressed =
+                compressed_layer3_content(self.tokenizer.as_ref(), self.budget, message);
+            let mut candidate = message.clone();
+            candidate.content = compressed;
+            let compressed_tokens = count_message_tokens(self.tokenizer.as_ref(), &candidate);
+            if compressed_tokens < original_tokens {
+                *message = candidate;
+                return true;
+            }
+        }
+        false
+    }
+
+    fn truncate_oldest_evidence(&mut self) -> bool {
+        for message in &mut self.messages {
+            if !is_evidence_message(message) || message.content == truncated_evidence_content() {
+                continue;
+            }
+
+            let original_tokens = count_message_tokens(self.tokenizer.as_ref(), message);
+            let mut candidate = message.clone();
+            candidate.content = truncated_evidence_content().to_owned();
+            let truncated_tokens = count_message_tokens(self.tokenizer.as_ref(), &candidate);
+            if truncated_tokens < original_tokens {
+                *message = candidate;
+                return true;
+            }
+        }
+        false
     }
 
     fn doc_store_clone(&self) -> std::result::Result<DocStore, String> {
@@ -958,6 +1065,71 @@ fn evidence_summary(observations: &[ToolObservation]) -> String {
     summary
 }
 
+fn layer_token_usage_from_budget_status(status: &BudgetStatus) -> LayerTokenUsage {
+    LayerTokenUsage {
+        layer1_conversation: layer_tokens(&status.layer_usage, Layer::Layer1Conversation),
+        layer2_evidence: layer_tokens(&status.layer_usage, Layer::Layer2Evidence),
+        layer3_temp_output: layer_tokens(&status.layer_usage, Layer::Layer3TempOutput),
+    }
+}
+
+fn log_budget_suggestions(status: &BudgetStatus) {
+    for suggestion in &status.suggestions {
+        tracing::warn!(suggestion = %suggestion, "conversation token budget pressure");
+    }
+}
+
+fn compressed_layer3_content(
+    tokenizer: &dyn Tokenizer,
+    budget: BudgetEngine,
+    message: &Message,
+) -> String {
+    let original_tokens = count_message_tokens(tokenizer, message);
+    let preview_budget = original_tokens
+        .saturating_div(4)
+        .min(budget.layer(Layer::Layer3TempOutput).saturating_div(20))
+        .max(1);
+    let preview = token_limited_prefix(&message.content, preview_budget, tokenizer);
+    format!("Layer 3 compressed tool output: original_tokens={original_tokens}; preview={preview}")
+}
+
+fn token_limited_prefix(text: &str, max_tokens: usize, tokenizer: &dyn Tokenizer) -> String {
+    if max_tokens == 0 || text.is_empty() {
+        return String::new();
+    }
+    if tokenizer.count_tokens(text) <= max_tokens {
+        return text.to_owned();
+    }
+
+    let char_indices: Vec<usize> = text.char_indices().map(|(idx, _)| idx).collect();
+    let mut low = 0;
+    let mut high = char_indices.len();
+    while low < high {
+        let mid = (low + high).div_ceil(2);
+        let end = if mid == char_indices.len() {
+            text.len()
+        } else {
+            char_indices[mid]
+        };
+        if tokenizer.count_tokens(&text[..end]) <= max_tokens {
+            low = mid;
+        } else {
+            high = mid - 1;
+        }
+    }
+
+    let end = if low == char_indices.len() {
+        text.len()
+    } else {
+        char_indices[low]
+    };
+    text[..end].to_owned()
+}
+
+fn truncated_evidence_content() -> &'static str {
+    "Evidence summary (Layer 2):\n- truncated: oldest evidence removed to restore token budget\n"
+}
+
 fn json_string(value: Value) -> String {
     serde_json::to_string(&value).unwrap_or_else(|error| {
         format!(
@@ -1024,12 +1196,14 @@ mod tests {
     #[derive(Clone)]
     struct MockLlm {
         responses: Arc<Mutex<VecDeque<ChatResponse>>>,
+        requests: Arc<Mutex<Vec<ChatRequest>>>,
     }
 
     impl MockLlm {
         fn new(responses: Vec<ChatResponse>) -> Self {
             Self {
                 responses: Arc::new(Mutex::new(responses.into())),
+                requests: Arc::new(Mutex::new(Vec::new())),
             }
         }
     }
@@ -1037,13 +1211,17 @@ mod tests {
     impl CompletionClient for MockLlm {
         fn complete_streaming<'a, F>(
             &'a self,
-            _request: &'a ChatRequest,
+            request: &'a ChatRequest,
             _callback: F,
         ) -> Pin<Box<dyn Future<Output = cps_llm::Result<ChatResponse>> + Send + 'a>>
         where
             F: FnMut(StreamChunk) + Send + 'a,
         {
             Box::pin(async move {
+                self.requests
+                    .lock()
+                    .expect("mock request lock")
+                    .push(request.clone());
                 let response = self
                     .responses
                     .lock()
@@ -1056,6 +1234,10 @@ mod tests {
     }
 
     fn loop_with(responses: Vec<ChatResponse>) -> AgentLoop<MockLlm> {
+        loop_with_budget(responses, BudgetEngine::new(100_000, 10_000))
+    }
+
+    fn loop_with_budget(responses: Vec<ChatResponse>, budget: BudgetEngine) -> AgentLoop<MockLlm> {
         let doc_store = Arc::new(RwLock::new(DocStore::new()));
         let doc_runner = DocRunner::new(DocRunnerConfig {
             allow_programs: vec!["kubectl".to_owned()],
@@ -1080,8 +1262,8 @@ mod tests {
             doc_store,
             doc_runner,
             policy,
-            tokenizer: Box::new(FallbackTokenizer::new()),
-            budget: BudgetEngine::new(10_000, 1_000),
+            tokenizer: Arc::new(FallbackTokenizer::new()),
+            budget,
             session,
         })
     }
@@ -1391,5 +1573,62 @@ mod tests {
             .iter()
             .any(|message| message.role == Role::Tool
                 && message.content.contains("\"proposal\":\"accepted\"")));
+    }
+
+    #[test]
+    fn layer3_compression_reduces_token_count() {
+        let mut agent = loop_with_budget(Vec::new(), BudgetEngine::new(20_000, 2_000));
+        let message = Message::tool_result("call_1", "x".repeat(40_000));
+        let original_tokens = count_message_tokens(agent.tokenizer.as_ref(), &message);
+        agent.messages.push(message);
+
+        assert!(agent.compress_oldest_layer3_content());
+
+        let compressed = agent
+            .messages
+            .iter()
+            .find(|message| message.role == Role::Tool)
+            .expect("compressed tool message exists");
+        let compressed_tokens = count_message_tokens(agent.tokenizer.as_ref(), compressed);
+        assert!(compressed
+            .content
+            .starts_with("Layer 3 compressed tool output:"));
+        assert!(compressed_tokens < original_tokens);
+    }
+
+    #[tokio::test]
+    async fn budget_enforcement_compresses_raw_tool_output_before_followup_llm_call() {
+        let mut agent = loop_with_budget(
+            vec![
+                response(assistant_tool(
+                    "doc_lines",
+                    json!({
+                        "doc": "d1",
+                        "start": 1,
+                        "end": 2
+                    }),
+                )),
+                response(assistant_tool("done", json!({}))),
+            ],
+            BudgetEngine::new(20_000, 2_000),
+        );
+        agent.doc_store.read().expect("doc store lock").insert(
+            "d1",
+            "x".repeat(40_000),
+            SourceKind::LocalDoc,
+            agent.tokenizer.as_ref(),
+        );
+
+        let result = agent.run_turn("read a large line").await.expect("turn ok");
+
+        assert_eq!(result.state, AgentState::Idle);
+        let requests = agent.llm.requests.lock().expect("mock request lock");
+        assert_eq!(requests.len(), 2);
+        assert!(requests[1].messages.iter().any(|message| {
+            message.role == Role::Tool
+                && message
+                    .content
+                    .starts_with("Layer 3 compressed tool output:")
+        }));
     }
 }
