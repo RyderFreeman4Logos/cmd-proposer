@@ -27,6 +27,7 @@ use crate::budget::{
     classify_message_layer, count_message_tokens, is_evidence_message, layer_tokens, BudgetStatus,
     BudgetTracker,
 };
+use crate::message_manager::MessageManager;
 use crate::session::SessionInit;
 use crate::subagent::{SubagentPool, SpawnRequest, SubagentRole};
 
@@ -140,6 +141,7 @@ pub struct AgentLoop<L = LlmClient> {
     pub system_prompt: String,
     pub tool_definitions: Vec<Value>,
     pub subagent_pool: SubagentPool,
+    pub message_manager: MessageManager,
 
     model_name: String,
     layer_tokens: LayerTokenUsage,
@@ -206,6 +208,11 @@ impl<L> AgentLoop<L> {
             layer_usage: budget_tracker.layer_usage.clone(),
             suggestions: Vec::new(),
         });
+        let message_manager = MessageManager::new(
+            Arc::clone(&tokenizer),
+            &system_prompt,
+            &tool_definitions,
+        );
 
         Self {
             state: AgentState::Idle,
@@ -220,6 +227,7 @@ impl<L> AgentLoop<L> {
             system_prompt,
             tool_definitions,
             subagent_pool: parts.subagent_pool,
+            message_manager,
             model_name: parts.model_name,
             layer_tokens,
             max_tool_rounds: MAX_TOOL_ROUNDS,
@@ -656,16 +664,20 @@ where
     }
 
     fn append_user_message(&mut self, content: &str) {
-        self.messages.push(Message::user(content));
+        let msg = Message::user(content);
+        self.message_manager.add_message(msg.clone());
+        self.messages.push(msg);
         self.refresh_budget_usage();
     }
 
     fn append_assistant_message(&mut self, message: Message) {
+        self.message_manager.add_message(message.clone());
         self.messages.push(message);
         self.refresh_budget_usage();
     }
 
     fn append_tool_result(&mut self, message: &Message) {
+        self.message_manager.add_message(message.clone());
         self.messages.push(message.clone());
         self.refresh_budget_usage();
     }
@@ -676,11 +688,23 @@ where
         }
 
         let summary = evidence_summary(observations);
-        self.messages.push(Message::assistant(summary));
+        let msg = Message::assistant(summary);
+        self.message_manager.add_message(msg.clone());
+        self.messages.push(msg);
         self.refresh_budget_usage();
     }
 
     fn chat_request(&mut self) -> Result<ChatRequest> {
+        // KV cache prefix stability check (Rule 4).
+        if !self
+            .message_manager
+            .verify_prefix(&self.system_prompt, &self.tool_definitions)
+        {
+            tracing::error!(
+                "system prompt or tool definitions changed mid-session -- KV cache will miss"
+            );
+        }
+
         self.enforce_budget_before_llm_request()?;
         Ok(ChatRequest {
             model: self.model_name.clone(),
