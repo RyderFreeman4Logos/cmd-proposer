@@ -8,9 +8,20 @@ rust-version.workspace = true
 description = "Main agent loop, evidence compression, and subagent pool for cmd-proposer"
 
 [dependencies]
+cps-budget = { workspace = true }
 cps-config = { workspace = true }
+cps-doc-runner = { workspace = true }
+cps-doc-store = { workspace = true }
+cps-llm = { workspace = true }
+cps-policy = { workspace = true }
+cps-proposal = { workspace = true }
+cps-tokenizer = { workspace = true }
+anyhow = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
 
 [dev-dependencies]
 serde_yaml = { workspace = true }

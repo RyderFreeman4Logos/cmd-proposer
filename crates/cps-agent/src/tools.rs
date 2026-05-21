@@ -30,12 +30,14 @@ pub struct ToolFeatureFlags {
 /// Build the tool schema list. Always sorted alphabetically by tool name.
 pub fn build(flags: ToolFeatureFlags) -> Vec<Value> {
     let mut tools: Vec<Value> = vec![
+        done(),
         doc_expand_around(),
         doc_grep(),
         doc_lines(),
         doc_preview(),
         doc_section(),
         doc_token_count(),
+        execute(),
         propose_command(),
         read_help(),
         read_info(),
@@ -347,6 +349,44 @@ fn spawn() -> Value {
     )
 }
 
+// ---------- execution / turn control ----------
+
+fn done() -> Value {
+    function(
+        "done",
+        "End the current agent turn without proposing a command. The runtime transitions back to Idle.",
+        json!({
+            "type": "object",
+            "properties": {},
+            "additionalProperties": false
+        }),
+    )
+}
+
+fn execute() -> Value {
+    function(
+        "execute",
+        "Execution runner hook. MVP returns `execution not implemented yet`; policy still requires explicit user approval and argv validation before this tool can run.",
+        json!({
+            "type": "object",
+            "properties": {
+                "argv": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "minItems": 1,
+                    "description": "Token array to execute after human approval."
+                },
+                "user_approved": {
+                    "type": "boolean",
+                    "description": "MUST be true only after the human approval UI confirms execution."
+                }
+            },
+            "required": ["argv", "user_approved"],
+            "additionalProperties": false
+        }),
+    )
+}
+
 // ---------- final proposal ----------
 
 fn propose_command() -> Value {
@@ -386,12 +426,15 @@ fn propose_command() -> Value {
                 },
                 "rollback": {
                     "type": ["object", "null"],
-                    "description": "Optional rollback hint: how to undo this command if it lands badly.",
+                    "description": "Optional rollback availability and notes.",
                     "properties": {
-                        "argv":  { "type": "array", "items": { "type": "string" }, "minItems": 1 },
+                        "available": {
+                            "type": "string",
+                            "enum": ["available", "partial", "none"]
+                        },
                         "notes": { "type": "string" }
                     },
-                    "required": ["argv"],
+                    "required": ["available", "notes"],
                     "additionalProperties": false
                 },
                 "evidence": {
@@ -487,12 +530,14 @@ mod tests {
         let tools = build(all_on());
         let got: std::collections::BTreeSet<&str> = names(&tools).into_iter().collect();
         let required: std::collections::BTreeSet<&str> = [
+            "done",
             "doc_expand_around",
             "doc_grep",
             "doc_lines",
             "doc_preview",
             "doc_section",
             "doc_token_count",
+            "execute",
             "propose_command",
             "read_help",
             "read_info",
@@ -534,7 +579,7 @@ mod tests {
         let got = names(&tools);
         assert!(!got.contains(&"web_search"));
         assert!(!got.contains(&"spawn"));
-        assert_eq!(got.len(), 10);
+        assert_eq!(got.len(), 12);
     }
 
     #[test]
