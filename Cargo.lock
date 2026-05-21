@@ -200,6 +200,13 @@ version = "0.1.0"
 [[package]]
 name = "cps-doc-store"
 version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "cps-tokenizer",
+ "regex",
+ "thiserror 2.0.18",
+ "tracing",
+]
 
 [[package]]
 name = "cps-exec"
