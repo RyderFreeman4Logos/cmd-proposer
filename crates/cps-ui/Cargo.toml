@@ -8,3 +8,7 @@ rust-version.workspace = true
 description = "ratatui three-zone UI with key bindings and progress display for cmd-proposer"
 
 [dependencies]
+cps-policy = { workspace = true }
+cps-proposal = { workspace = true }
+crossterm = "0.28"
+ratatui = "0.29"
