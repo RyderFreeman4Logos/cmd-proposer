@@ -17,7 +17,6 @@ anyhow.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 futures-util.workspace = true
-async-trait.workspace = true
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

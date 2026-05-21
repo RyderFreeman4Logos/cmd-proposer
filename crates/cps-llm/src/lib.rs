@@ -312,10 +312,76 @@ mod tests {
         assert!(msg.tool_calls.is_none());
     }
 
+    #[tokio::test]
+    async fn complete_streaming_handles_utf8_split_across_http_chunks() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        async fn write_http_chunk(socket: &mut tokio::net::TcpStream, bytes: &[u8]) {
+            socket
+                .write_all(format!("{:x}\r\n", bytes.len()).as_bytes())
+                .await
+                .unwrap();
+            socket.write_all(bytes).await.unwrap();
+            socket.write_all(b"\r\n").await.unwrap();
+        }
+
+        let event = b"data: {\"choices\":[{\"delta\":{\"content\":\"\xe4\xbd\xa0\"}}]}\n\n";
+        let glyph_start = event.windows(3).position(|w| w == b"\xe4\xbd\xa0").unwrap();
+        let split_at = glyph_start + 2;
+        let first_chunk = event[..split_at].to_vec();
+        let second_chunk = event[split_at..].to_vec();
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0_u8; 2048];
+            let _bytes_read = socket.read(&mut request).await.unwrap();
+
+            socket
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ntransfer-encoding: chunked\r\n\r\n",
+                )
+                .await
+                .unwrap();
+            write_http_chunk(&mut socket, &first_chunk).await;
+            write_http_chunk(&mut socket, &second_chunk).await;
+            write_http_chunk(&mut socket, b"data: [DONE]\n\n").await;
+            socket.write_all(b"0\r\n\r\n").await.unwrap();
+            socket.shutdown().await.unwrap();
+        });
+
+        let client = LlmClient::new(&ClientConfig {
+            base_url: format!("http://{addr}/v1"),
+            api_key: String::new(),
+            request_timeout_ms: 1000,
+        })
+        .unwrap();
+        let request = ChatRequest::new("test-model", vec![Message::user("hello")]);
+        let mut streamed = String::new();
+
+        let response = client
+            .complete_streaming(&request, |chunk| {
+                if let Some(content) = chunk.delta_content {
+                    streamed.push_str(&content);
+                }
+            })
+            .await
+            .unwrap();
+
+        server.await.unwrap();
+        assert_eq!(streamed, "\u{4f60}");
+        assert_eq!(response.message.content, "\u{4f60}");
+    }
+
     // ---------- error classification ----------
 
     #[test]
     fn from_status_classifies_correctly() {
+        assert!(matches!(
+            LlmError::from_status(408, String::new(), None),
+            LlmError::Timeout { timeout_ms: 0 }
+        ));
         assert!(matches!(
             LlmError::from_status(401, String::new(), None),
             LlmError::Unauthorized
@@ -327,6 +393,10 @@ mod tests {
         assert!(matches!(
             LlmError::from_status(429, String::new(), Some(30)),
             LlmError::RateLimit { retry_after_secs: Some(30) }
+        ));
+        assert!(matches!(
+            LlmError::from_status(425, "too early".into(), None),
+            LlmError::Server { status: 425, .. }
         ));
         assert!(matches!(
             LlmError::from_status(500, "boom".into(), None),
@@ -347,6 +417,8 @@ mod tests {
         assert!(LlmError::Timeout { timeout_ms: 1000 }.is_transient());
         assert!(LlmError::Connection("refused".into()).is_transient());
         assert!(LlmError::RateLimit { retry_after_secs: None }.is_transient());
+        assert!(LlmError::from_status(408, String::new(), None).is_transient());
+        assert!(LlmError::from_status(425, String::new(), None).is_transient());
         assert!(LlmError::Server { status: 500, body: String::new() }.is_transient());
 
         assert!(!LlmError::Unauthorized.is_transient());

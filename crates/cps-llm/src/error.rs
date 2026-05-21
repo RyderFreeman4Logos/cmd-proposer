@@ -49,7 +49,9 @@ impl LlmError {
 
     pub(crate) fn from_status(status: u16, body: String, retry_after_secs: Option<u64>) -> Self {
         match status {
+            408 => LlmError::Timeout { timeout_ms: 0 },
             401 | 403 => LlmError::Unauthorized,
+            425 => LlmError::Server { status, body },
             429 => LlmError::RateLimit { retry_after_secs },
             500..=599 => LlmError::Server { status, body },
             _ => LlmError::BadRequest { status, body },

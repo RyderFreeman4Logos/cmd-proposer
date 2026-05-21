@@ -96,7 +96,7 @@ impl LlmClient {
             .json(&body)
             .send()
             .await
-            .map_err(map_send_err)?;
+            .map_err(|e| map_send_err(e, self.request_timeout))?;
 
         let status = response.status();
         if !status.is_success() {
@@ -146,7 +146,7 @@ impl LlmClient {
                     timeout_ms: self.request_timeout.as_millis() as u64,
                 })
             }
-            Ok(r) => r.map_err(map_send_err)?,
+            Ok(r) => r.map_err(|e| map_send_err(e, self.request_timeout))?,
         };
 
         let status = response.status();
@@ -155,7 +155,7 @@ impl LlmClient {
         }
 
         let mut byte_stream = response.bytes_stream();
-        let mut buffer = String::new();
+        let mut buffer = Vec::new();
         let mut assembler = StreamAssembler::default();
         let deadline = tokio::time::Instant::now() + self.request_timeout;
 
@@ -172,20 +172,13 @@ impl LlmClient {
                 Ok(Some(Ok(bytes))) => bytes,
             };
 
-            let text = std::str::from_utf8(&chunk)
-                .map_err(|e| LlmError::Malformed(format!("non-utf8 stream chunk: {e}")))?;
-            buffer.push_str(text);
+            buffer.extend_from_slice(&chunk);
 
-            while let Some(idx) = find_event_boundary(&buffer) {
-                let event = buffer[..idx].to_string();
-                // `idx` points at the first byte of the boundary (\n\n or
-                // \r\n\r\n). Strip the boundary by finding the next non-
-                // newline byte after it.
-                let rest_start = buffer[idx..]
-                    .find(|c: char| c != '\n' && c != '\r')
-                    .map(|off| idx + off)
-                    .unwrap_or(buffer.len());
-                buffer = buffer[rest_start..].to_string();
+            while let Some((idx, delimiter_len)) = find_event_boundary(&buffer) {
+                let event = std::str::from_utf8(&buffer[..idx])
+                    .map_err(|e| LlmError::Malformed(format!("non-utf8 stream event: {e}")))?
+                    .to_owned();
+                buffer.drain(..idx + delimiter_len);
 
                 process_event_block(&event, &mut assembler, &mut callback)?;
             }
@@ -194,30 +187,47 @@ impl LlmClient {
         // Flush any trailing event the server didn't terminate with the
         // double-newline (some lightweight servers close the connection
         // immediately after the final payload).
-        if !buffer.trim().is_empty() {
-            let trailing = std::mem::take(&mut buffer);
+        if !is_sse_whitespace(&buffer) {
+            let trailing = std::str::from_utf8(&buffer)
+                .map_err(|e| LlmError::Malformed(format!("non-utf8 stream event: {e}")))?
+                .to_owned();
             process_event_block(&trailing, &mut assembler, &mut callback)?;
         }
 
         let (message, finish_reason, usage) = assembler.finalize();
-        Ok(ChatResponse { message, usage, finish_reason })
+        Ok(ChatResponse {
+            message,
+            usage,
+            finish_reason,
+        })
     }
 }
 
 /// Locate the end of the next SSE event in `buf`.
 ///
 /// SSE event delimiter is a blank line (`\n\n` or `\r\n\r\n`). Returns the
-/// byte index of the first delimiter byte, or `None` if no complete event
-/// is buffered yet.
-fn find_event_boundary(buf: &str) -> Option<usize> {
+/// byte index of the first delimiter byte plus delimiter length, or `None`
+/// if no complete event is buffered yet.
+fn find_event_boundary(buf: &[u8]) -> Option<(usize, usize)> {
     // Prefer the earliest of the two possible delimiters.
-    let a = buf.find("\n\n");
-    let b = buf.find("\r\n\r\n");
+    let a = buf
+        .windows(2)
+        .position(|w| w == b"\n\n")
+        .map(|idx| (idx, 2));
+    let b = buf
+        .windows(4)
+        .position(|w| w == b"\r\n\r\n")
+        .map(|idx| (idx, 4));
     match (a, b) {
-        (Some(x), Some(y)) => Some(x.min(y)),
+        (Some(x), Some(y)) => Some(if x.0 <= y.0 { x } else { y }),
         (Some(x), None) | (None, Some(x)) => Some(x),
         (None, None) => None,
     }
+}
+
+fn is_sse_whitespace(buf: &[u8]) -> bool {
+    buf.iter()
+        .all(|b| matches!(b, b' ' | b'\t' | b'\n' | b'\r'))
 }
 
 /// Parse one complete SSE event block (which may contain multiple `data:`
@@ -254,11 +264,12 @@ where
     Ok(())
 }
 
-fn map_send_err(e: reqwest::Error) -> LlmError {
+fn map_send_err(e: reqwest::Error, request_timeout: Duration) -> LlmError {
     if e.is_timeout() {
         debug!("reqwest timeout");
-        // Best-effort: reqwest does not expose its configured timeout here.
-        LlmError::Timeout { timeout_ms: 0 }
+        LlmError::Timeout {
+            timeout_ms: request_timeout.as_millis() as u64,
+        }
     } else {
         LlmError::Connection(e.to_string())
     }
