@@ -65,7 +65,7 @@ fi
 
 # ── Blocked — emit reverse prompt injection for agent context ─────────────────
 cat >&2 <<GATE_BLOCKED
-<!-- CSA:REVIEW_GATE_BLOCKED branch="${SAFE_BRANCH}" head_sha="${SHORT_SHA}" -->
+<!-- CSA:REVIEW_GATE_BLOCKED branch="${CURRENT_BRANCH}" head_sha="${CURRENT_HEAD}" -->
 Push blocked: no passing review found for current HEAD.
 Run: csa review --range main...HEAD --sa-mode true
 Wait for PASS verdict, then retry push.

@@ -7,6 +7,7 @@
 
 use std::ffi::OsString;
 use std::io;
+use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
@@ -20,6 +21,9 @@ use tokio::time::timeout;
 
 const PREVIEW_TOKEN_LIMIT: usize = 200;
 const DEFAULT_PATH: &str = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
+const DOC_ACTION_HELP: &str = "help";
+const DOC_ACTION_MAN: &str = "man";
+const DOC_ACTION_INFO: &str = "info";
 const DEFAULT_RO_BINDS: &[&str] = &[
     "/usr",
     "/bin",
@@ -52,6 +56,7 @@ impl DocRunner {
         doc_store: &DocStore,
         tokenizer: &dyn Tokenizer,
     ) -> Result<DocResult> {
+        self.ensure_action_allowed(DOC_ACTION_HELP)?;
         self.ensure_program_allowed(program)?;
         for subcommand in subcommands {
             validate_subcommand(subcommand)?;
@@ -78,6 +83,7 @@ impl DocRunner {
         doc_store: &DocStore,
         tokenizer: &dyn Tokenizer,
     ) -> Result<DocResult> {
+        self.ensure_action_allowed(DOC_ACTION_MAN)?;
         validate_topic(topic)?;
 
         let mut argv = Vec::with_capacity(3);
@@ -97,6 +103,7 @@ impl DocRunner {
         doc_store: &DocStore,
         tokenizer: &dyn Tokenizer,
     ) -> Result<DocResult> {
+        self.ensure_action_allowed(DOC_ACTION_INFO)?;
         validate_topic(topic)?;
 
         let argv = vec!["info".to_string(), topic.to_string()];
@@ -117,6 +124,18 @@ impl DocRunner {
             return Ok(());
         }
         Err(DocRunnerError::ProgramNotAllowed(program.to_string()))
+    }
+
+    fn ensure_action_allowed(&self, action: &str) -> Result<()> {
+        if self
+            .config
+            .allow_doc_actions
+            .iter()
+            .any(|allowed| allowed == action)
+        {
+            return Ok(());
+        }
+        Err(DocRunnerError::ActionNotAllowed(action.to_string()))
     }
 
     async fn capture_to_store(
@@ -215,10 +234,19 @@ impl DocRunner {
         push_arg(&mut args, "--clearenv");
 
         for path in DEFAULT_RO_BINDS {
-            push_ro_bind(&mut args, path);
+            if Path::new(path).exists() {
+                push_ro_bind(&mut args, path);
+            }
         }
         for path in &self.config.extra_bind_ro {
-            push_ro_bind(&mut args, path);
+            if Path::new(path).exists() {
+                push_ro_bind(&mut args, path);
+            } else {
+                tracing::warn!(
+                    path = %path,
+                    "skipping missing extra doc runner read-only bind path"
+                );
+            }
         }
 
         push_arg(&mut args, "--tmpfs");
@@ -267,6 +295,9 @@ impl HelpStyle {
 pub enum DocRunnerError {
     #[error("program is not allowed for doc runner: {0}")]
     ProgramNotAllowed(String),
+
+    #[error("doc action is not allowed for doc runner: {0}")]
+    ActionNotAllowed(String),
 
     #[error("invalid subcommand: {0}")]
     InvalidSubcommand(String),
@@ -481,6 +512,7 @@ fn preview_text(text: &str, tokenizer: &dyn Tokenizer, max_tokens: usize) -> Str
 #[cfg(test)]
 mod tests {
     use super::*;
+    use cps_tokenizer::FallbackTokenizer;
 
     fn config() -> DocRunnerConfig {
         DocRunnerConfig {
@@ -489,8 +521,15 @@ mod tests {
             timeout_ms: 60_000,
             max_output_bytes: 16,
             allow_doc_actions: vec!["help".to_string(), "man".to_string(), "info".to_string()],
-            extra_bind_ro: vec!["/opt/docs".to_string()],
+            extra_bind_ro: vec![existing_extra_bind()],
         }
+    }
+
+    fn existing_extra_bind() -> String {
+        std::env::current_dir()
+            .expect("current directory")
+            .to_string_lossy()
+            .into_owned()
     }
 
     fn args(command: &Command) -> Vec<String> {
@@ -519,17 +558,17 @@ mod tests {
             "--clearenv".to_string(),
         ]));
         assert!(contains_sequence(&args, &["--ro-bind", "/usr", "/usr"]));
+        for path in DEFAULT_RO_BINDS {
+            assert_eq!(
+                contains_sequence(&args, &["--ro-bind", path, path]),
+                Path::new(path).exists(),
+                "default bind path {path} should match host existence"
+            );
+        }
+        let extra_bind = existing_extra_bind();
         assert!(contains_sequence(
             &args,
-            &["--ro-bind", "/etc/alternatives", "/etc/alternatives"]
-        ));
-        assert!(contains_sequence(
-            &args,
-            &["--ro-bind", "/usr/share/man", "/usr/share/man"]
-        ));
-        assert!(contains_sequence(
-            &args,
-            &["--ro-bind", "/opt/docs", "/opt/docs"]
+            &["--ro-bind", extra_bind.as_str(), extra_bind.as_str()]
         ));
         assert!(contains_sequence(&args, &["--tmpfs", "/tmp"]));
         assert!(contains_sequence(
@@ -545,6 +584,20 @@ mod tests {
             "rollout".to_string(),
             "--help".to_string(),
         ]));
+    }
+
+    #[test]
+    fn build_bwrap_command_skips_missing_extra_bind_paths() {
+        let missing = "/definitely/missing/cps-doc-runner-extra-bind";
+        assert!(!Path::new(missing).exists());
+
+        let mut cfg = config();
+        cfg.extra_bind_ro = vec![missing.to_string()];
+        let runner = DocRunner::new(cfg);
+        let command = runner.build_bwrap_command(&["kubectl".to_string(), "--help".to_string()]);
+        let args = args(&command);
+
+        assert!(!contains_sequence(&args, &["--ro-bind", missing, missing]));
     }
 
     #[test]
@@ -601,6 +654,34 @@ mod tests {
         assert!(matches!(
             runner.ensure_program_allowed("sh"),
             Err(DocRunnerError::ProgramNotAllowed(program)) if program == "sh"
+        ));
+    }
+
+    #[tokio::test]
+    async fn read_methods_reject_disallowed_doc_actions() {
+        let store = DocStore::new();
+        let tokenizer = FallbackTokenizer::new();
+
+        let mut cfg = config();
+        cfg.allow_doc_actions = vec!["man".to_string(), "info".to_string()];
+        let runner = DocRunner::new(cfg);
+        assert!(matches!(
+            runner
+                .read_help("kubectl", &[], HelpStyle::Long, &store, &tokenizer)
+                .await,
+            Err(DocRunnerError::ActionNotAllowed(action)) if action == "help"
+        ));
+
+        let mut cfg = config();
+        cfg.allow_doc_actions = vec!["help".to_string()];
+        let runner = DocRunner::new(cfg);
+        assert!(matches!(
+            runner.read_man("kubectl", None, &store, &tokenizer).await,
+            Err(DocRunnerError::ActionNotAllowed(action)) if action == "man"
+        ));
+        assert!(matches!(
+            runner.read_info("kubectl", &store, &tokenizer).await,
+            Err(DocRunnerError::ActionNotAllowed(action)) if action == "info"
         ));
     }
 
