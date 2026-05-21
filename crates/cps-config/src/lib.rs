@@ -416,6 +416,12 @@ impl Config {
             return Err(ValidateError::EmptyRequired("doc_runner.allow_programs"));
         }
         // api_key MAY be empty (no-auth local endpoint), per SPEC §12.2.
+        // Safety invariant: typed confirmation is non-configurable when execution is enabled.
+        if self.approval.execute_enabled && !self.approval.high_risk_requires_typed_confirmation {
+            return Err(ValidateError::EmptyRequired(
+                "approval.high_risk_requires_typed_confirmation must be true when execute_enabled",
+            ));
+        }
         if self.thinking.main_agent >= self.model.max_context_tokens {
             return Err(ValidateError::ThinkingExceedsContext {
                 tokens: self.model.max_context_tokens,
