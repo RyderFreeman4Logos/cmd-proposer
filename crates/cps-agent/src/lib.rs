@@ -5,6 +5,7 @@
 
 pub mod agent_loop;
 pub mod budget;
+pub mod message_manager;
 pub mod session;
 pub mod subagent;
 pub mod system_prompt;
@@ -19,4 +20,5 @@ pub use session::SessionInit;
 pub use subagent::{
     SubagentError, SubagentPool, SubagentResult, SubagentRole, SubagentStatus, SpawnRequest,
 };
+pub use message_manager::MessageManager;
 pub use tools::ToolFeatureFlags;
