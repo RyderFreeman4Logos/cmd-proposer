@@ -7,7 +7,7 @@ use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, CONTENT_TYPE};
 use tracing::{debug, trace, warn};
 
 use crate::error::{LlmError, Result};
-use crate::stream::{parse_event, StreamAssembler, StreamChunk};
+use crate::stream::{parse_event, ParseOutcome, StreamAssembler, StreamChunk};
 use crate::types::{ChatCompletionResponse, ChatRequest, ChatResponse};
 
 /// Async client for an OpenAI-compatible chat completion endpoint.
@@ -158,6 +158,7 @@ impl LlmClient {
         let mut buffer = Vec::new();
         let mut assembler = StreamAssembler::default();
         let deadline = tokio::time::Instant::now() + self.request_timeout;
+        let mut saw_done = false;
 
         loop {
             let next = tokio::time::timeout_at(deadline, byte_stream.next()).await;
@@ -180,14 +181,21 @@ impl LlmClient {
                     .to_owned();
                 buffer.drain(..idx + delimiter_len);
 
-                process_event_block(&event, &mut assembler, &mut callback)?;
+                if process_event_block(&event, &mut assembler, &mut callback)? {
+                    saw_done = true;
+                    break;
+                }
+            }
+
+            if saw_done {
+                break;
             }
         }
 
         // Flush any trailing event the server didn't terminate with the
         // double-newline (some lightweight servers close the connection
         // immediately after the final payload).
-        if !is_sse_whitespace(&buffer) {
+        if !saw_done && !is_sse_whitespace(&buffer) {
             let trailing = std::str::from_utf8(&buffer)
                 .map_err(|e| LlmError::Malformed(format!("non-utf8 stream event: {e}")))?
                 .to_owned();
@@ -236,7 +244,7 @@ fn process_event_block<F>(
     block: &str,
     assembler: &mut StreamAssembler,
     callback: &mut F,
-) -> Result<()>
+) -> Result<bool>
 where
     F: FnMut(StreamChunk),
 {
@@ -248,8 +256,9 @@ where
         };
 
         match parse_event(payload) {
-            Ok(None) => continue, // [DONE] or keepalive
-            Ok(Some((chunk, usage))) => {
+            Ok(ParseOutcome::Skip) => continue,
+            Ok(ParseOutcome::Done) => return Ok(true),
+            Ok(ParseOutcome::Data(chunk, usage)) => {
                 trace!(?chunk, "sse chunk");
                 assembler.ingest(&chunk)?;
                 assembler.set_usage(usage);
@@ -261,7 +270,7 @@ where
             }
         }
     }
-    Ok(())
+    Ok(false)
 }
 
 fn map_send_err(e: reqwest::Error, request_timeout: Duration) -> LlmError {

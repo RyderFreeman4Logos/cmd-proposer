@@ -228,16 +228,23 @@ mod tests {
 
     // ---------- streaming parsing ----------
 
+    fn parse_chunk(payload: &str) -> (StreamChunk, Option<Usage>) {
+        match super::stream::parse_event(payload).unwrap() {
+            super::stream::ParseOutcome::Data(chunk, usage) => (chunk, usage),
+            other => panic!("expected stream data chunk, got {other:?}"),
+        }
+    }
+
     #[test]
     fn parse_event_handles_done_sentinel() {
         let r = super::stream::parse_event("[DONE]").unwrap();
-        assert!(r.is_none());
+        assert!(matches!(r, super::stream::ParseOutcome::Done));
     }
 
     #[test]
     fn parse_event_handles_content_delta() {
         let payload = r#"{"choices":[{"delta":{"role":"assistant","content":"Hel"}}]}"#;
-        let (chunk, usage) = super::stream::parse_event(payload).unwrap().unwrap();
+        let (chunk, usage) = parse_chunk(payload);
         assert_eq!(chunk.delta_content.as_deref(), Some("Hel"));
         assert!(chunk.delta_tool_calls.is_none());
         assert!(usage.is_none());
@@ -246,7 +253,7 @@ mod tests {
     #[test]
     fn parse_event_handles_tool_call_delta() {
         let payload = r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"read_help","arguments":"{\"p"}}]}}]}"#;
-        let (chunk, _) = super::stream::parse_event(payload).unwrap().unwrap();
+        let (chunk, _) = parse_chunk(payload);
         let deltas = chunk.delta_tool_calls.unwrap();
         assert_eq!(deltas.len(), 1);
         assert_eq!(deltas[0].index, 0);
@@ -258,7 +265,7 @@ mod tests {
     #[test]
     fn parse_event_handles_finish_reason_chunk() {
         let payload = r#"{"choices":[{"delta":{},"finish_reason":"tool_calls"}]}"#;
-        let (chunk, _) = super::stream::parse_event(payload).unwrap().unwrap();
+        let (chunk, _) = parse_chunk(payload);
         assert_eq!(chunk.finish_reason.as_deref(), Some("tool_calls"));
     }
 
@@ -266,32 +273,26 @@ mod tests {
     fn parse_event_skips_empty_keepalive() {
         let payload = r#"{"choices":[]}"#;
         let r = super::stream::parse_event(payload).unwrap();
-        assert!(r.is_none());
+        assert!(matches!(r, super::stream::ParseOutcome::Skip));
     }
 
     #[test]
     fn stream_assembler_concatenates_tool_call_arguments() {
         let mut a = super::stream::StreamAssembler::default();
         // Fragment 1: header
-        let (c1, _) = super::stream::parse_event(
+        let (c1, _) = parse_chunk(
             r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_x","type":"function","function":{"name":"read_help","arguments":""}}]}}]}"#,
-        )
-        .unwrap()
-        .unwrap();
+        );
         a.ingest(&c1).unwrap();
         // Fragment 2: partial args
-        let (c2, _) = super::stream::parse_event(
+        let (c2, _) = parse_chunk(
             r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"program\":\"kub"}}]}}]}"#,
-        )
-        .unwrap()
-        .unwrap();
+        );
         a.ingest(&c2).unwrap();
         // Fragment 3: rest of args + finish
-        let (c3, _) = super::stream::parse_event(
+        let (c3, _) = parse_chunk(
             r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"ectl\"}"}}]},"finish_reason":"tool_calls"}]}"#,
-        )
-        .unwrap()
-        .unwrap();
+        );
         a.ingest(&c3).unwrap();
 
         let (msg, fr, _usage) = a.finalize();
@@ -311,11 +312,9 @@ mod tests {
     fn stream_assembler_drops_incomplete_tool_call() {
         // Saw a fragment with arguments but never the header (no id/name).
         let mut a = super::stream::StreamAssembler::default();
-        let (c1, _) = super::stream::parse_event(
+        let (c1, _) = parse_chunk(
             r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{}"}}]}}]}"#,
-        )
-        .unwrap()
-        .unwrap();
+        );
         a.ingest(&c1).unwrap();
         let (msg, _, _) = a.finalize();
         assert!(
@@ -329,7 +328,7 @@ mod tests {
         let mut a = super::stream::StreamAssembler::default();
         for word in ["Hel", "lo, ", "world", "!"] {
             let payload = format!(r#"{{"choices":[{{"delta":{{"content":"{word}"}}}}]}}"#);
-            let (chunk, _) = super::stream::parse_event(&payload).unwrap().unwrap();
+            let (chunk, _) = parse_chunk(&payload);
             a.ingest(&chunk).unwrap();
         }
         let (msg, _, _) = a.finalize();
@@ -414,6 +413,67 @@ mod tests {
         server.await.unwrap();
         assert_eq!(streamed, "\u{4f60}");
         assert_eq!(response.message.content, "\u{4f60}");
+    }
+
+    #[tokio::test]
+    async fn complete_streaming_stops_at_done_without_waiting_for_socket_close() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        async fn write_http_chunk(socket: &mut tokio::net::TcpStream, bytes: &[u8]) {
+            socket
+                .write_all(format!("{:x}\r\n", bytes.len()).as_bytes())
+                .await
+                .unwrap();
+            socket.write_all(bytes).await.unwrap();
+            socket.write_all(b"\r\n").await.unwrap();
+        }
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0_u8; 2048];
+            let _bytes_read = socket.read(&mut request).await.unwrap();
+
+            socket
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ntransfer-encoding: chunked\r\n\r\n",
+                )
+                .await
+                .unwrap();
+            write_http_chunk(
+                &mut socket,
+                b"data: {\"choices\":[{\"delta\":{\"content\":\"before\"}}]}\n\ndata: [DONE]\n\ndata: {\"choices\":[{\"delta\":{\"content\":\"after\"}}]}\n\n",
+            )
+            .await;
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        });
+
+        let client = LlmClient::new(&ClientConfig {
+            base_url: format!("http://{addr}/v1"),
+            api_key: String::new(),
+            request_timeout_ms: 5_000,
+        })
+        .unwrap();
+        let request = ChatRequest::new("test-model", vec![Message::user("hello")]);
+        let mut streamed = String::new();
+
+        let completed = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            client.complete_streaming(&request, |chunk| {
+                if let Some(content) = chunk.delta_content {
+                    streamed.push_str(&content);
+                }
+            }),
+        )
+        .await;
+        server.abort();
+        let response = completed
+            .expect("client must return as soon as [DONE] is parsed")
+            .unwrap();
+
+        assert_eq!(streamed, "before");
+        assert_eq!(response.message.content, "before");
     }
 
     // ---------- error classification ----------

@@ -27,6 +27,14 @@ pub struct StreamChunk {
     pub finish_reason: Option<String>,
 }
 
+/// Parsed outcome for one SSE `data:` payload.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ParseOutcome {
+    Data(StreamChunk, Option<Usage>),
+    Skip,
+    Done,
+}
+
 /// Incremental fragment of a tool call inside a stream chunk.
 ///
 /// `index` is the stable position of this tool call within the assistant's
@@ -87,15 +95,16 @@ struct RawFunctionDelta {
 
 /// Parse one SSE `data:` payload into a [`StreamChunk`] plus optional usage.
 ///
-/// Returns `Ok(None)` for `[DONE]` sentinels and for events that carry
-/// neither a delta nor a finish reason (e.g. role-only header chunks); the
-/// caller should skip these without invoking the user callback.
-pub(crate) fn parse_event(
-    json_str: &str,
-) -> std::result::Result<Option<(StreamChunk, Option<Usage>)>, serde_json::Error> {
+/// Returns [`ParseOutcome::Done`] for `[DONE]`, [`ParseOutcome::Skip`] for
+/// keepalive/header events, and [`ParseOutcome::Data`] for chunks the caller
+/// should assemble and pass to the user callback.
+pub(crate) fn parse_event(json_str: &str) -> std::result::Result<ParseOutcome, serde_json::Error> {
     let trimmed = json_str.trim();
-    if trimmed.is_empty() || trimmed == "[DONE]" {
-        return Ok(None);
+    if trimmed.is_empty() {
+        return Ok(ParseOutcome::Skip);
+    }
+    if trimmed == "[DONE]" {
+        return Ok(ParseOutcome::Done);
     }
     let event: StreamEvent = serde_json::from_str(trimmed)?;
     let usage = event.usage;
@@ -126,10 +135,10 @@ pub(crate) fn parse_event(
         && chunk.finish_reason.is_none()
         && usage.is_none()
     {
-        return Ok(None);
+        return Ok(ParseOutcome::Skip);
     }
 
-    Ok(Some((chunk, usage)))
+    Ok(ParseOutcome::Data(chunk, usage))
 }
 
 /// Accumulates streamed deltas into a fully-formed assistant [`Message`].
