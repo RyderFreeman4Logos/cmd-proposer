@@ -8,3 +8,10 @@ rust-version.workspace = true
 description = "bwrap sandbox execution for --help/man/info commands"
 
 [dependencies]
+cps-config.workspace = true
+cps-doc-store.workspace = true
+cps-tokenizer.workspace = true
+tokio.workspace = true
+thiserror.workspace = true
+anyhow.workspace = true
+tracing.workspace = true

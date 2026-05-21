@@ -226,6 +226,15 @@ dependencies = [
 [[package]]
 name = "cps-doc-runner"
 version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "cps-config",
+ "cps-doc-store",
+ "cps-tokenizer",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+]
 
 [[package]]
 name = "cps-doc-store"

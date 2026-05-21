@@ -2,7 +2,11 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 
 #[derive(Parser, Debug)]
-#[command(name = "cps", version, about = "cmd-proposer — sandboxed argv proposer for production ops")]
+#[command(
+    name = "cps",
+    version,
+    about = "cmd-proposer — sandboxed argv proposer for production ops"
+)]
 struct Cli {
     #[command(subcommand)]
     cmd: Option<Command>,
