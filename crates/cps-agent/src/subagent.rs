@@ -4,17 +4,18 @@
 //! with bounded context and tool access, designed for lightweight exploration
 //! and risk review tasks per SPEC §9.
 
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use cps_llm::{Message, ChatRequest, ChatResponse};
-use crate::agent_loop::CompletionClient;
+use crate::agent_loop::{CompletionClient, TokenCounters};
+use cps_llm::{ChatRequest, ChatResponse, Message};
 use cps_tokenizer::Tokenizer;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use thiserror::Error;
 use tokio::task::JoinHandle;
 use tokio::time::timeout;
-use thiserror::Error;
 
 /// MVP subagent roles per SPEC §9.1
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -170,6 +171,7 @@ impl SubagentPool {
         model_name: &str,
         max_subagent_context: usize,
         tokenizer: Arc<dyn Tokenizer>,
+        counters: Arc<TokenCounters>,
     ) -> Result<SubagentResult, SubagentError>
     where
         L: CompletionClient + Clone + 'static,
@@ -178,9 +180,12 @@ impl SubagentPool {
         self.validate_request(&request, max_subagent_context)?;
 
         // Check if we can spawn another subagent
-        let mut active_handles = self.active.lock().map_err(|_| SubagentError::ExecutionFailed {
-            source: cps_llm::LlmError::Timeout { timeout_ms: 0 }
-        })?;
+        let mut active_handles =
+            self.active
+                .lock()
+                .map_err(|_| SubagentError::ExecutionFailed {
+                    source: cps_llm::LlmError::Timeout { timeout_ms: 0 },
+                })?;
 
         // Clean up completed handles
         active_handles.retain(|handle| !handle.is_finished());
@@ -194,9 +199,12 @@ impl SubagentPool {
 
         // Generate unique ID
         let subagent_id = {
-            let mut counter = self.next_id.lock().map_err(|_| SubagentError::ExecutionFailed {
-                source: cps_llm::LlmError::Timeout { timeout_ms: 0 },
-            })?;
+            let mut counter = self
+                .next_id
+                .lock()
+                .map_err(|_| SubagentError::ExecutionFailed {
+                    source: cps_llm::LlmError::Timeout { timeout_ms: 0 },
+                })?;
             let id = *counter;
             *counter += 1;
             format!("{:?}-{}", request.role, id)
@@ -212,8 +220,16 @@ impl SubagentPool {
         let handle = tokio::spawn(async move {
             let result = timeout(
                 timeout_duration,
-                execute_subagent(subagent_id.clone(), request_clone, llm_clone, model_name_clone, tokenizer)
-            ).await;
+                execute_subagent(
+                    subagent_id.clone(),
+                    request_clone,
+                    llm_clone,
+                    model_name_clone,
+                    tokenizer,
+                    counters,
+                ),
+            )
+            .await;
 
             match result {
                 Ok(Ok(result)) => Ok(result),
@@ -231,15 +247,20 @@ impl SubagentPool {
         // In a more advanced implementation, this could return immediately
         // and allow polling of results
         let result_handle = {
-            let mut handles = self.active.lock().map_err(|_| SubagentError::ExecutionFailed {
-                source: cps_llm::LlmError::Timeout { timeout_ms: 0 },
-            })?;
+            let mut handles = self
+                .active
+                .lock()
+                .map_err(|_| SubagentError::ExecutionFailed {
+                    source: cps_llm::LlmError::Timeout { timeout_ms: 0 },
+                })?;
             handles.pop().unwrap() // We just pushed it
         };
 
-        result_handle.await.map_err(|_| SubagentError::ExecutionFailed {
-            source: cps_llm::LlmError::Timeout { timeout_ms: 0 },
-        })?
+        result_handle
+            .await
+            .map_err(|_| SubagentError::ExecutionFailed {
+                source: cps_llm::LlmError::Timeout { timeout_ms: 0 },
+            })?
     }
 
     /// Validate a spawn request
@@ -299,6 +320,7 @@ async fn execute_subagent<L>(
     llm: L,
     model_name: String,
     _tokenizer: Arc<dyn Tokenizer>,
+    counters: Arc<TokenCounters>,
 ) -> Result<SubagentResult, SubagentError>
 where
     L: CompletionClient,
@@ -331,6 +353,15 @@ where
 
     // Execute the LLM call
     let response = llm.complete(&chat_request).await?;
+
+    if let Some(usage) = &response.usage {
+        counters
+            .subagent_completion_tokens
+            .fetch_add(u64::from(usage.completion_tokens), Ordering::Relaxed);
+        counters
+            .subagent_output_tokens
+            .fetch_add(u64::from(usage.completion_tokens), Ordering::Relaxed);
+    }
 
     // Parse the response and extract findings
     let findings = parse_subagent_findings(&response, &subagent_id)?;
@@ -377,11 +408,26 @@ fn parse_subagent_findings(
     for line in content.lines() {
         let line = line.trim();
         if line.starts_with("FINDING:") {
-            findings.push(line.strip_prefix("FINDING:").unwrap_or(line).trim().to_owned());
+            findings.push(
+                line.strip_prefix("FINDING:")
+                    .unwrap_or(line)
+                    .trim()
+                    .to_owned(),
+            );
         } else if line.starts_with("FRAGMENT:") {
-            candidate_fragments.push(line.strip_prefix("FRAGMENT:").unwrap_or(line).trim().to_owned());
+            candidate_fragments.push(
+                line.strip_prefix("FRAGMENT:")
+                    .unwrap_or(line)
+                    .trim()
+                    .to_owned(),
+            );
         } else if line.starts_with("QUESTION:") {
-            open_questions.push(line.strip_prefix("QUESTION:").unwrap_or(line).trim().to_owned());
+            open_questions.push(
+                line.strip_prefix("QUESTION:")
+                    .unwrap_or(line)
+                    .trim()
+                    .to_owned(),
+            );
         } else if !line.is_empty() && !line.starts_with("GOAL:") && !line.starts_with("INPUT:") {
             // Treat other non-empty lines as findings
             findings.push(line.to_owned());

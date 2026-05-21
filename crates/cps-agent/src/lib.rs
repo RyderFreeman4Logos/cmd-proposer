@@ -13,12 +13,12 @@ pub mod tools;
 
 pub use agent_loop::{
     AgentError, AgentLoop, AgentLoopParts, AgentState, CompletionClient, LayerTokenUsage, Result,
-    TurnResult,
+    TokenCounters, TurnResult,
 };
 pub use budget::{BudgetStatus, BudgetTracker};
+pub use message_manager::MessageManager;
 pub use session::SessionInit;
 pub use subagent::{
-    SubagentError, SubagentPool, SubagentResult, SubagentRole, SubagentStatus, SpawnRequest,
+    SpawnRequest, SubagentError, SubagentPool, SubagentResult, SubagentRole, SubagentStatus,
 };
-pub use message_manager::MessageManager;
 pub use tools::ToolFeatureFlags;

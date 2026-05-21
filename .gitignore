@@ -1,1 +1,10 @@
 /target
+.test-target/
+.tmp/
+dist/
+node_modules/
+__pycache__/
+*.pyc
+*.log
+*_output.*
+screenshots/

@@ -31,3 +31,4 @@ tokio.workspace = true
 tracing-subscriber.workspace = true
 dotenvy.workspace = true
 dirs.workspace = true
+rustyline.workspace = true
