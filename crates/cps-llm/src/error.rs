@@ -38,13 +38,16 @@ pub type Result<T> = std::result::Result<T, LlmError>;
 impl LlmError {
     /// True if a retry with backoff stands a reasonable chance of succeeding.
     pub fn is_transient(&self) -> bool {
-        matches!(
-            self,
+        match self {
             LlmError::Timeout { .. }
-                | LlmError::Connection(_)
-                | LlmError::RateLimit { .. }
-                | LlmError::Server { .. }
-        )
+            | LlmError::Connection(_)
+            | LlmError::RateLimit { .. }
+            | LlmError::Server { .. } => true,
+            // vLLM/SGLang intermittently return 400 with JSON-parse errors
+            // ("Expecting ',' delimiter") despite valid request bodies.
+            LlmError::BadRequest { body, .. } => body.contains("Expecting"),
+            _ => false,
+        }
     }
 
     pub(crate) fn from_status(status: u16, body: String, retry_after_secs: Option<u64>) -> Self {
