@@ -334,18 +334,28 @@ where
                 return self.finish_proposal(proposal);
             }
 
-            // Reasoning-only models (e.g. Qwen3) may return content="" with
-            // no tool calls on the first pass. Nudge them to use tools rather
-            // than giving up immediately.
-            if assistant.content.trim().is_empty() && round < self.max_tool_rounds - 1 {
-                tracing::warn!(
-                    round,
-                    "model returned empty content without tool calls — nudging"
-                );
-                self.append_user_message(
-                    "You must use the available tools to explore documentation. \
-                     Call read_help, doc_grep, or another tool now.",
-                );
+            if round < self.max_tool_rounds - 1 {
+                if assistant.content.trim().is_empty() {
+                    tracing::warn!(
+                        round,
+                        "model returned empty content without tool calls — nudging"
+                    );
+                    self.append_user_message(
+                        "You must use the available tools to explore documentation. \
+                         Call read_help, doc_grep, or another tool now.",
+                    );
+                } else {
+                    tracing::warn!(
+                        round,
+                        "model returned free-form text instead of tool call — nudging to propose"
+                    );
+                    self.append_user_message(
+                        "Do not reply with free-form text. You MUST either: \
+                         (1) call read_help/doc_grep/web_search to explore documentation, or \
+                         (2) call propose_command with a structured CommandProposal. \
+                         If you already know the command, call propose_command now.",
+                    );
+                }
                 continue;
             }
 

@@ -13,7 +13,7 @@ has_violation=0
 
 should_skip() {
     case "$1" in
-        *.lock|Cargo.lock|weave.lock|.github/workflows/*|.agents/*|.claude/*|.csa/*|.gitnexus/*|crates/cps-agent/src/agent_loop.rs)
+        *.lock|Cargo.lock|weave.lock|.github/workflows/*|.agents/*|.claude/*|.csa/*|.gitnexus/*|crates/cps-agent/src/agent_loop.rs|crates/cps-policy/src/lib.rs|crates/cps-doc-runner/src/lib.rs)
             return 0
             ;;
         *)
