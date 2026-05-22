@@ -181,11 +181,7 @@ impl ProposalChecker {
     }
 
     /// Suggest safer alternatives if applicable.
-    fn suggest_alternatives(
-        &self,
-        proposal: &CommandProposal,
-        suggestions: &mut Vec<String>,
-    ) {
+    fn suggest_alternatives(&self, proposal: &CommandProposal, suggestions: &mut Vec<String>) {
         let risk = self.policy.classify_risk(&proposal.argv);
 
         // (a) Suggest dry-run if the program supports it and it's not already present
@@ -212,11 +208,7 @@ impl ProposalChecker {
     }
 
     /// Validate implicit assumptions in proposals for k8s/cloud commands.
-    fn validate_assumptions(
-        &self,
-        proposal: &CommandProposal,
-        warnings: &mut Vec<String>,
-    ) {
+    fn validate_assumptions(&self, proposal: &CommandProposal, warnings: &mut Vec<String>) {
         let program = match proposal.argv.first() {
             Some(p) => p.as_str(),
             None => return,
@@ -251,10 +243,7 @@ impl ProposalChecker {
                     lower.contains("context") || lower.contains("cluster")
                 })
             {
-                warnings.push(format!(
-                    "{} command uses implicit current context",
-                    program
-                ));
+                warnings.push(format!("{} command uses implicit current context", program));
             }
         }
 
@@ -272,10 +261,7 @@ impl ProposalChecker {
                     lower.contains("region") || lower.contains("location")
                 })
             {
-                warnings.push(format!(
-                    "{} command uses implicit default region",
-                    program
-                ));
+                warnings.push(format!("{} command uses implicit default region", program));
             }
         }
     }
@@ -307,9 +293,9 @@ impl ProposalChecker {
         }
 
         // Missing evidence entirely
-        let no_evidence = findings
-            .iter()
-            .any(|f| f.code == PolicyFindingCode::MissingEvidence && f.message == "proposal has no evidence");
+        let no_evidence = findings.iter().any(|f| {
+            f.code == PolicyFindingCode::MissingEvidence && f.message == "proposal has no evidence"
+        });
         if no_evidence && level >= Risk::Medium {
             level = escalate(level);
         }
@@ -377,11 +363,10 @@ fn has_dry_run_flag(proposal: &CommandProposal) -> bool {
         .iter()
         .any(|a| DRY_RUN_FLAGS.contains(&a.as_str()));
 
-    let in_preflight = proposal.preflight.iter().any(|cmd| {
-        cmd.argv
-            .iter()
-            .any(|a| DRY_RUN_FLAGS.contains(&a.as_str()))
-    });
+    let in_preflight = proposal
+        .preflight
+        .iter()
+        .any(|cmd| cmd.argv.iter().any(|a| DRY_RUN_FLAGS.contains(&a.as_str())));
 
     in_argv || in_preflight
 }
@@ -531,7 +516,10 @@ mod tests {
         let verdict = checker.check(&proposal, &doc_store_with(&[]));
 
         assert!(
-            verdict.warnings.iter().any(|w| w == "no local doc evidence"),
+            verdict
+                .warnings
+                .iter()
+                .any(|w| w == "no local doc evidence"),
             "expected 'no local doc evidence' warning, got: {:?}",
             verdict.warnings
         );
@@ -566,7 +554,15 @@ mod tests {
     fn dry_run_flag_de_escalates_risk() {
         let checker = checker();
         let mut proposal = base_proposal(
-            argv(["kubectl", "-n", "prod", "delete", "pod", "api", "--dry-run=server"]),
+            argv([
+                "kubectl",
+                "-n",
+                "prod",
+                "delete",
+                "pod",
+                "api",
+                "--dry-run=server",
+            ]),
             Risk::High,
         );
         proposal.evidence = strong_local_evidence();
@@ -595,10 +591,7 @@ mod tests {
         let verdict = checker.check(&proposal, &docs);
 
         assert!(
-            verdict
-                .suggestions
-                .iter()
-                .any(|s| s.contains("preflight")),
+            verdict.suggestions.iter().any(|s| s.contains("preflight")),
             "expected preflight suggestion, got: {:?}",
             verdict.suggestions
         );
@@ -608,7 +601,14 @@ mod tests {
     fn full_pipeline_produces_correct_verdict() {
         let checker = checker();
         let mut proposal = base_proposal(
-            argv(["kubectl", "-n", "payments", "rollout", "restart", "deployment/api"]),
+            argv([
+                "kubectl",
+                "-n",
+                "payments",
+                "rollout",
+                "restart",
+                "deployment/api",
+            ]),
             Risk::Medium,
         );
         proposal.evidence = vec![Evidence {
@@ -639,7 +639,10 @@ mod tests {
         );
         // No "no local doc evidence" warning (has local doc)
         assert!(
-            !verdict.warnings.iter().any(|w| w == "no local doc evidence"),
+            !verdict
+                .warnings
+                .iter()
+                .any(|w| w == "no local doc evidence"),
             "should not warn about web-only evidence"
         );
     }
@@ -674,7 +677,14 @@ mod tests {
     fn dry_run_suggestion_for_medium_risk_with_dry_run_support() {
         let checker = checker();
         let proposal = base_proposal(
-            argv(["kubectl", "-n", "prod", "rollout", "restart", "deployment/api"]),
+            argv([
+                "kubectl",
+                "-n",
+                "prod",
+                "rollout",
+                "restart",
+                "deployment/api",
+            ]),
             Risk::Medium,
         );
         let docs = doc_store_with(&["kubectl-help"]);
@@ -682,10 +692,7 @@ mod tests {
         let verdict = checker.check(&proposal, &docs);
 
         assert!(
-            verdict
-                .suggestions
-                .iter()
-                .any(|s| s.contains("--dry-run")),
+            verdict.suggestions.iter().any(|s| s.contains("--dry-run")),
             "expected --dry-run suggestion for medium-risk kubectl command, got: {:?}",
             verdict.suggestions
         );
@@ -708,10 +715,7 @@ mod tests {
     #[test]
     fn cloud_command_missing_region_warns() {
         let checker = checker();
-        let proposal = base_proposal(
-            argv(["aws", "s3", "ls"]),
-            Risk::Low,
-        );
+        let proposal = base_proposal(argv(["aws", "s3", "ls"]), Risk::Low);
         let docs = doc_store_with(&["kubectl-help"]);
 
         let verdict = checker.check(&proposal, &docs);
@@ -730,7 +734,15 @@ mod tests {
     fn strong_local_evidence_de_escalates() {
         let checker = checker();
         let mut proposal = base_proposal(
-            argv(["kubectl", "-n", "prod", "--context=staging", "delete", "pod", "api"]),
+            argv([
+                "kubectl",
+                "-n",
+                "prod",
+                "--context=staging",
+                "delete",
+                "pod",
+                "api",
+            ]),
             Risk::High,
         );
         proposal.evidence = strong_local_evidence();
@@ -766,10 +778,7 @@ mod tests {
     #[test]
     fn k8s_implicit_context_warning() {
         let checker = checker();
-        let proposal = base_proposal(
-            argv(["kubectl", "-n", "prod", "get", "pods"]),
-            Risk::Low,
-        );
+        let proposal = base_proposal(argv(["kubectl", "-n", "prod", "get", "pods"]), Risk::Low);
         let docs = doc_store_with(&["kubectl-help"]);
 
         let verdict = checker.check(&proposal, &docs);
@@ -787,10 +796,7 @@ mod tests {
     #[test]
     fn assumption_about_context_suppresses_warning() {
         let checker = checker();
-        let mut proposal = base_proposal(
-            argv(["kubectl", "-n", "prod", "get", "pods"]),
-            Risk::Low,
-        );
+        let mut proposal = base_proposal(argv(["kubectl", "-n", "prod", "get", "pods"]), Risk::Low);
         proposal.assumptions = vec!["current context is the staging cluster".to_owned()];
         let docs = doc_store_with(&["kubectl-help"]);
 

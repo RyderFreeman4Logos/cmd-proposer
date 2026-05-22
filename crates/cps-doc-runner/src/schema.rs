@@ -175,7 +175,10 @@ mod tests {
 
         let deploy = &schema.subcommands[0];
         assert_eq!(deploy.path, vec!["deploy"]);
-        assert_eq!(deploy.description.as_deref(), Some("Deploy the application"));
+        assert_eq!(
+            deploy.description.as_deref(),
+            Some("Deploy the application")
+        );
         assert_eq!(deploy.args.len(), 1);
         assert_eq!(deploy.flags.len(), 3);
         assert_eq!(deploy.examples.len(), 1);
@@ -285,7 +288,10 @@ mod tests {
             }]
         }"#;
         let schema = parse_schema_json(json).expect("valid JSON");
-        assert_eq!(schema.subcommands[0].flags[0].flag_type, FlagType::StringVal);
+        assert_eq!(
+            schema.subcommands[0].flags[0].flag_type,
+            FlagType::StringVal
+        );
     }
 
     #[test]
