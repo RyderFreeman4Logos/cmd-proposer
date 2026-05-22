@@ -111,11 +111,16 @@ async fn run() -> Result<()> {
     if let Some(intent) = cli.intent_text() {
         let mut stdout = io::stdout();
         let active = Arc::new(AtomicBool::new(true));
-        let _display = DisplayGuard(spawn_token_display(
-            Arc::clone(&counters),
-            active,
-            verbose_rx,
-        ));
+        let two_line = Arc::new(AtomicBool::new(false));
+        let _display = DisplayGuard {
+            handle: spawn_token_display(
+                Arc::clone(&counters),
+                active,
+                Arc::clone(&two_line),
+                verbose_rx,
+            ),
+            two_line,
+        };
         let result = run_non_interactive(&mut agent, &intent, &mut stdout).await;
         result?;
         return Ok(());
@@ -160,11 +165,22 @@ where
     Ok(())
 }
 
-struct DisplayGuard(tokio::task::JoinHandle<()>);
+struct DisplayGuard {
+    handle: tokio::task::JoinHandle<()>,
+    two_line: Arc<AtomicBool>,
+}
 
 impl Drop for DisplayGuard {
     fn drop(&mut self) {
-        self.0.abort();
+        self.handle.abort();
+        clear_display(&self.two_line);
+    }
+}
+
+fn clear_display(two_line: &AtomicBool) {
+    if two_line.load(Ordering::Relaxed) {
+        eprint!("\x1b[2K\x1b[A\x1b[2K\r");
+    } else {
         eprint!("\r\x1b[K");
     }
 }
@@ -172,6 +188,7 @@ impl Drop for DisplayGuard {
 fn spawn_token_display(
     counters: Arc<TokenCounters>,
     active: Arc<AtomicBool>,
+    two_line: Arc<AtomicBool>,
     mut verbose_rx: Option<mpsc::UnboundedReceiver<String>>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
@@ -183,7 +200,8 @@ fn spawn_token_display(
             if let Some(rx) = &mut verbose_rx {
                 while let Ok(msg) = rx.try_recv() {
                     if active.load(Ordering::Relaxed) {
-                        eprint!("\r\x1b[K");
+                        clear_display(&two_line);
+                        two_line.store(false, Ordering::Relaxed);
                         eprintln!("\x1b[36m{msg}\x1b[0m");
                     }
                 }
@@ -208,22 +226,35 @@ fn spawn_token_display(
                 String::new()
             };
 
-            if round_start > 0 && main_out == last_main_out {
-                let elapsed = epoch_ms_now().saturating_sub(round_start);
-                let secs = elapsed as f64 / 1000.0;
-                eprint!(
-                    "\r\x1b[K\x1b[2m ⏳ thinking... {secs:.1}s (round {}){retry_suffix}\x1b[0m",
-                    round + 1
-                );
-            } else if main_out > 0
+            let has_data = main_out > 0
                 || main_comp > 0
                 || sub_out > 0
                 || ctx > 0
                 || retries > 0
-                || round_start > 0
-            {
-                let main_display = main_out.max(main_comp);
-                let sub_display = sub_out.max(sub_comp);
+                || round_start > 0;
+
+            if !has_data {
+                last_main_out = main_out;
+                continue;
+            }
+
+            let main_display = main_out.max(main_comp);
+            let sub_display = sub_out.max(sub_comp);
+
+            if round_start > 0 && main_out == last_main_out {
+                let elapsed = epoch_ms_now().saturating_sub(round_start);
+                let secs = elapsed as f64 / 1000.0;
+                clear_display(&two_line);
+                eprint!(
+                    "\x1b[2m tokens \x1b[0m main: {main_display} | sub: {sub_display} | ctx: {ctx}{retry_suffix}\n\x1b[2m ⏳ thinking... {secs:.1}s (round {})\x1b[0m",
+                    round + 1
+                );
+                two_line.store(true, Ordering::Relaxed);
+            } else {
+                if two_line.load(Ordering::Relaxed) {
+                    clear_display(&two_line);
+                    two_line.store(false, Ordering::Relaxed);
+                }
                 eprint!(
                     "\r\x1b[K\x1b[2m tokens \x1b[0m main: {main_display} | sub: {sub_display} | ctx: {ctx} | round: {}{retry_suffix}  ",
                     round + 1
@@ -246,11 +277,16 @@ async fn run_interactive(
 
     let mut rl = rustyline::DefaultEditor::new().context("failed to initialize line editor")?;
     let active = Arc::new(AtomicBool::new(false));
-    let _display = DisplayGuard(spawn_token_display(
-        Arc::clone(&counters),
-        Arc::clone(&active),
-        verbose_rx,
-    ));
+    let two_line = Arc::new(AtomicBool::new(false));
+    let _display = DisplayGuard {
+        handle: spawn_token_display(
+            Arc::clone(&counters),
+            Arc::clone(&active),
+            Arc::clone(&two_line),
+            verbose_rx,
+        ),
+        two_line: Arc::clone(&two_line),
+    };
 
     loop {
         let input = match rl.readline("cps> ") {
@@ -270,7 +306,8 @@ async fn run_interactive(
         active.store(true, Ordering::Relaxed);
         let result = run_turn_or_interrupt(&mut agent, input).await;
         active.store(false, Ordering::Relaxed);
-        eprint!("\r\x1b[K");
+        clear_display(&two_line);
+        two_line.store(false, Ordering::Relaxed);
 
         let Some(result) = result? else {
             println!();

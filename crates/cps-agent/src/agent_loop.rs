@@ -344,6 +344,10 @@ where
             self.counters.round_start_ms.store(0, Ordering::Relaxed);
 
             let assistant = response.message;
+            let thinking = assistant.content.trim();
+            if !thinking.is_empty() {
+                self.emit_verbose(format!("  thinking: {}", truncate_utf8(thinking, 200)));
+            }
             self.append_assistant_message(assistant.clone());
 
             if let Some(tool_calls) = non_empty_tool_calls(&assistant) {
@@ -430,7 +434,8 @@ where
 
     async fn dispatch_tool_call(&self, call: &ToolCall) -> ToolOutcome {
         let name = call.function.name.as_str();
-        self.emit_verbose(format!("  → {name}"));
+        let args = &call.function.arguments;
+        self.emit_verbose(format!("  → {name}({})", truncate_utf8(args, 120)));
 
         if name == "done" {
             return ToolOutcome::done(call, "done");
@@ -1426,6 +1431,17 @@ fn policy_config_from_config(config: &Config, budget: BudgetEngine) -> PolicyCon
         execute_enabled: config.approval.execute_enabled,
         max_subagent_context: budget.subagent_context(),
     }
+}
+
+fn truncate_utf8(s: &str, max_bytes: usize) -> String {
+    if s.len() <= max_bytes {
+        return s.to_owned();
+    }
+    let mut end = max_bytes;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}...", &s[..end])
 }
 
 fn epoch_ms_now() -> u64 {
