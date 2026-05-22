@@ -296,7 +296,7 @@ impl PolicyGate {
         self.config
             .allow_programs
             .iter()
-            .any(|allowed| allowed == program)
+            .any(|allowed| allowed == "*" || allowed == program)
     }
 
     fn check_evidence(&self, proposal: &CommandProposal, findings: &mut Vec<PolicyFinding>) {

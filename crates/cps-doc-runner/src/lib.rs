@@ -12,9 +12,7 @@
 
 pub mod schema;
 
-pub use schema::{
-    ArgSchema, CliSchema, FlagSchema, FlagType, SubcommandSchema,
-};
+pub use schema::{ArgSchema, CliSchema, FlagSchema, FlagType, SubcommandSchema};
 
 use std::ffi::OsString;
 use std::io;
@@ -183,7 +181,12 @@ impl DocRunner {
     }
 
     fn ensure_program_allowed(&self, program: &str) -> Result<()> {
-        if self.config.allow_programs.iter().any(|p| p == program) {
+        if self
+            .config
+            .allow_programs
+            .iter()
+            .any(|p| p == "*" || p == program)
+        {
             return Ok(());
         }
         Err(DocRunnerError::ProgramNotAllowed(program.to_string()))
