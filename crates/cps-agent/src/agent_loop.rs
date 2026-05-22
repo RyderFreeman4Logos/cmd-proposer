@@ -79,6 +79,8 @@ pub struct TokenCounters {
     pub subagent_completion_tokens: AtomicU64,
     pub context_tokens: AtomicU64,
     pub main_retries: AtomicU64,
+    pub round_start_ms: AtomicU64,
+    pub current_round: AtomicU64,
 }
 
 /// Error type for the agent loop.
@@ -166,6 +168,7 @@ pub struct AgentLoop<L = LlmClient> {
     transient_retries: u32,
     retry_delay: std::time::Duration,
     counters: Arc<TokenCounters>,
+    verbose_tx: Option<tokio::sync::mpsc::UnboundedSender<String>>,
 }
 
 /// Dependencies needed to construct an [`AgentLoop`].
@@ -183,6 +186,7 @@ pub struct AgentLoopParts<L> {
     pub retry_delay_ms: u64,
     pub max_tool_rounds: usize,
     pub counters: Option<Arc<TokenCounters>>,
+    pub verbose_tx: Option<tokio::sync::mpsc::UnboundedSender<String>>,
 }
 
 impl AgentLoop<LlmClient> {
@@ -214,6 +218,7 @@ impl AgentLoop<LlmClient> {
             retry_delay_ms: config.runtime.retry_delay_ms,
             max_tool_rounds: config.runtime.max_tool_rounds,
             counters: None,
+            verbose_tx: None,
         }))
     }
 }
@@ -266,6 +271,7 @@ impl<L> AgentLoop<L> {
             transient_retries: parts.transient_retries,
             retry_delay: std::time::Duration::from_millis(parts.retry_delay_ms),
             counters,
+            verbose_tx: parts.verbose_tx,
         }
     }
 
@@ -282,6 +288,16 @@ impl<L> AgentLoop<L> {
     #[must_use]
     pub fn counters(&self) -> &Arc<TokenCounters> {
         &self.counters
+    }
+
+    pub fn set_verbose(&mut self, tx: tokio::sync::mpsc::UnboundedSender<String>) {
+        self.verbose_tx = Some(tx);
+    }
+
+    fn emit_verbose(&self, msg: impl std::fmt::Display) {
+        if let Some(tx) = &self.verbose_tx {
+            let _ = tx.send(msg.to_string());
+        }
     }
 }
 
@@ -316,8 +332,16 @@ where
                 AgentState::MergeFindings
             };
 
+            self.counters
+                .current_round
+                .store(round as u64, Ordering::Relaxed);
+            self.counters
+                .round_start_ms
+                .store(epoch_ms_now(), Ordering::Relaxed);
+            self.emit_verbose(format!("[round {}/{}]", round + 1, self.max_tool_rounds));
             let request = self.chat_request()?;
             let response = self.llm_call_with_retry(&request).await?;
+            self.counters.round_start_ms.store(0, Ordering::Relaxed);
 
             let assistant = response.message;
             self.append_assistant_message(assistant.clone());
@@ -336,6 +360,7 @@ where
 
             if round < self.max_tool_rounds - 1 {
                 if assistant.content.trim().is_empty() {
+                    self.emit_verbose("  nudge: empty response, requesting tool use");
                     tracing::warn!(
                         round,
                         "model returned empty content without tool calls — nudging"
@@ -345,6 +370,7 @@ where
                          Call read_help, doc_grep, or another tool now.",
                     );
                 } else {
+                    self.emit_verbose("  nudge: free-form text, requesting tool call");
                     tracing::warn!(
                         round,
                         "model returned free-form text instead of tool call — nudging to propose"
@@ -404,6 +430,7 @@ where
 
     async fn dispatch_tool_call(&self, call: &ToolCall) -> ToolOutcome {
         let name = call.function.name.as_str();
+        self.emit_verbose(format!("  → {name}"));
 
         if name == "done" {
             return ToolOutcome::done(call, "done");
@@ -1401,6 +1428,13 @@ fn policy_config_from_config(config: &Config, budget: BudgetEngine) -> PolicyCon
     }
 }
 
+fn epoch_ms_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::VecDeque;
@@ -1512,6 +1546,7 @@ mod tests {
             retry_delay_ms: 100,
             max_tool_rounds: 8,
             counters: None,
+            verbose_tx: None,
         })
     }
 

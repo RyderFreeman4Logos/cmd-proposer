@@ -3,8 +3,9 @@ use std::io::{self, Write as IoWrite};
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::process::ExitCode;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
@@ -14,8 +15,10 @@ use cps_config::{
     ProposalConfig, RiskConfig, RuntimeConfig, SearchConfig, SubagentsConfig, ThinkingConfig,
     TokenizerConfig,
 };
+use cps_exec::ExecutionRunner;
 use cps_proposal::{CommandProposal, EvidenceKind, Risk};
 use rustyline::error::ReadlineError;
+use tokio::sync::mpsc;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -36,6 +39,9 @@ struct Cli {
     /// Enable web search for this invocation.
     #[arg(long, conflicts_with = "offline")]
     online: bool,
+
+    #[arg(short, long)]
+    verbose: bool,
 
     #[command(subcommand)]
     cmd: Option<Command>,
@@ -93,17 +99,28 @@ async fn run() -> Result<()> {
     let mut agent = AgentLoop::from_config(&config).context("failed to initialize agent loop")?;
     let counters = Arc::clone(agent.counters());
 
+    let verbose_rx = if cli.verbose {
+        let (tx, rx) = mpsc::unbounded_channel();
+        agent.set_verbose(tx);
+        Some(rx)
+    } else {
+        None
+    };
+
     if let Some(intent) = cli.intent_text() {
         let mut stdout = io::stdout();
-        let display_handle = spawn_token_display(Arc::clone(&counters));
+        let active = Arc::new(AtomicBool::new(true));
+        let _display = DisplayGuard(spawn_token_display(
+            Arc::clone(&counters),
+            active,
+            verbose_rx,
+        ));
         let result = run_non_interactive(&mut agent, &intent, &mut stdout).await;
-        display_handle.abort();
-        clear_token_display_line();
         result?;
         return Ok(());
     }
 
-    run_interactive(agent, &config, counters).await
+    run_interactive(agent, &config, counters, verbose_rx).await
 }
 
 fn init_tracing() {
@@ -142,47 +159,97 @@ where
     Ok(())
 }
 
-fn spawn_token_display(counters: Arc<TokenCounters>) -> tokio::task::JoinHandle<()> {
+struct DisplayGuard(tokio::task::JoinHandle<()>);
+
+impl Drop for DisplayGuard {
+    fn drop(&mut self) {
+        self.0.abort();
+        eprint!("\r\x1b[K");
+    }
+}
+
+fn spawn_token_display(
+    counters: Arc<TokenCounters>,
+    active: Arc<AtomicBool>,
+    mut verbose_rx: Option<mpsc::UnboundedReceiver<String>>,
+) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_millis(100));
+        let mut last_main_out = 0u64;
         loop {
             interval.tick().await;
+
+            if let Some(rx) = &mut verbose_rx {
+                while let Ok(msg) = rx.try_recv() {
+                    if active.load(Ordering::Relaxed) {
+                        eprint!("\r\x1b[K");
+                        eprintln!("\x1b[36m{msg}\x1b[0m");
+                    }
+                }
+            }
+
+            if !active.load(Ordering::Relaxed) {
+                continue;
+            }
+
             let main_out = counters.main_output_tokens.load(Ordering::Relaxed);
             let main_comp = counters.main_completion_tokens.load(Ordering::Relaxed);
             let sub_out = counters.subagent_output_tokens.load(Ordering::Relaxed);
             let sub_comp = counters.subagent_completion_tokens.load(Ordering::Relaxed);
             let ctx = counters.context_tokens.load(Ordering::Relaxed);
             let retries = counters.main_retries.load(Ordering::Relaxed);
-            if main_out == 0 && main_comp == 0 && sub_out == 0 && ctx == 0 && retries == 0 {
-                continue;
-            }
-            let main_display = main_out.max(main_comp);
-            let sub_display = sub_out.max(sub_comp);
+            let round_start = counters.round_start_ms.load(Ordering::Relaxed);
+            let round = counters.current_round.load(Ordering::Relaxed);
+
             let retry_suffix = if retries > 0 {
                 format!(" | retry: {retries}")
             } else {
                 String::new()
             };
-            eprint!(
-                "\r\x1b[K\x1b[2m tokens \x1b[0m main: {main_display} | sub: {sub_display} | ctx: {ctx}{retry_suffix}  "
-            );
+
+            if round_start > 0 && main_out == last_main_out {
+                let elapsed = epoch_ms_now().saturating_sub(round_start);
+                let secs = elapsed as f64 / 1000.0;
+                eprint!(
+                    "\r\x1b[K\x1b[2m ⏳ thinking... {secs:.1}s (round {}){retry_suffix}\x1b[0m",
+                    round + 1
+                );
+            } else if main_out > 0
+                || main_comp > 0
+                || sub_out > 0
+                || ctx > 0
+                || retries > 0
+                || round_start > 0
+            {
+                let main_display = main_out.max(main_comp);
+                let sub_display = sub_out.max(sub_comp);
+                eprint!(
+                    "\r\x1b[K\x1b[2m tokens \x1b[0m main: {main_display} | sub: {sub_display} | ctx: {ctx} | round: {}{retry_suffix}  ",
+                    round + 1
+                );
+            }
+
+            last_main_out = main_out;
         }
     })
-}
-
-fn clear_token_display_line() {
-    eprint!("\r\x1b[K");
 }
 
 async fn run_interactive(
     mut agent: AgentLoop,
     config: &Config,
     counters: Arc<TokenCounters>,
+    verbose_rx: Option<mpsc::UnboundedReceiver<String>>,
 ) -> Result<()> {
     println!("cps {}", env!("CARGO_PKG_VERSION"));
     println!("Enter an intent. Ctrl+C or q exits.");
 
     let mut rl = rustyline::DefaultEditor::new().context("failed to initialize line editor")?;
+    let active = Arc::new(AtomicBool::new(false));
+    let _display = DisplayGuard(spawn_token_display(
+        Arc::clone(&counters),
+        Arc::clone(&active),
+        verbose_rx,
+    ));
 
     loop {
         let input = match rl.readline("cps> ") {
@@ -199,10 +266,10 @@ async fn run_interactive(
         }
         let _ = rl.add_history_entry(input);
 
-        let display_handle = spawn_token_display(Arc::clone(&counters));
+        active.store(true, Ordering::Relaxed);
         let result = run_turn_or_interrupt(&mut agent, input).await;
-        display_handle.abort();
-        clear_token_display_line();
+        active.store(false, Ordering::Relaxed);
+        eprint!("\r\x1b[K");
 
         let Some(result) = result? else {
             println!();
@@ -217,13 +284,7 @@ async fn run_interactive(
                 Err(e) => return Err(e.into()),
             };
             match review.trim() {
-                "y" | "Y" => {
-                    if config.approval.execute_enabled {
-                        println!("Accepted. Execution runner is not available in v0.1; command was not executed.");
-                    } else {
-                        println!("Accepted. Execution is disabled; command was not executed.");
-                    }
-                }
+                "y" | "Y" => execute_accepted_proposal(&mut rl, config, &proposal),
                 "q" | "Q" => return Ok(()),
                 _ => println!("Rejected. Enter a revised intent."),
             }
@@ -243,6 +304,76 @@ async fn run_turn_or_interrupt(agent: &mut AgentLoop, input: &str) -> Result<Opt
             Ok(Some(result?))
         }
     }
+}
+
+fn execute_accepted_proposal(
+    rl: &mut rustyline::DefaultEditor,
+    config: &Config,
+    proposal: &CommandProposal,
+) {
+    if !config.approval.execute_enabled {
+        println!("Execution is disabled. Set approval.execute_enabled = true in config.");
+        return;
+    }
+
+    let confirmation = match proposal.risk {
+        Risk::Low | Risk::Medium => None,
+        Risk::High => match rl.readline("⚠ HIGH risk — type 'yes' to confirm: ") {
+            Ok(line) if line.trim() == "yes" => Some("yes".to_owned()),
+            _ => {
+                println!("Rejected.");
+                return;
+            }
+        },
+        Risk::Critical => {
+            println!(
+                "⚠ CRITICAL risk — type the full command to confirm:\n  {}",
+                proposal.argv.join(" ")
+            );
+            match rl.readline("> ") {
+                Ok(line) => Some(line.trim().to_owned()),
+                _ => {
+                    println!("Rejected.");
+                    return;
+                }
+            }
+        }
+    };
+
+    let runner = ExecutionRunner::new(
+        true,
+        Duration::from_millis(config.runtime.global_timeout_ms),
+        None,
+    );
+
+    match runner.execute(&proposal.argv, proposal.risk, true, confirmation.as_deref()) {
+        Ok(result) => {
+            if !result.stdout.is_empty() {
+                print!("{}", result.stdout);
+            }
+            if !result.stderr.is_empty() {
+                eprint!("\x1b[31m{}\x1b[0m", result.stderr);
+            }
+            if result.timed_out {
+                println!("exit: timeout");
+            } else {
+                println!(
+                    "exit: {}",
+                    result
+                        .exit_code
+                        .map_or("killed".to_owned(), |c| c.to_string())
+                );
+            }
+        }
+        Err(e) => eprintln!("execution error: {e}"),
+    }
+}
+
+fn epoch_ms_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
 }
 
 fn format_proposal_plain(proposal: &CommandProposal) -> String {
