@@ -354,7 +354,7 @@ checksum = "773648b94d0e5d620f64f280777445740e61fe701025087ec8b57f45c791888b"
 
 [[package]]
 name = "cps"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "anyhow",
  "clap",
@@ -379,7 +379,7 @@ dependencies = [
 
 [[package]]
 name = "cps-agent"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "anyhow",
  "cps-budget",
@@ -400,7 +400,7 @@ dependencies = [
 
 [[package]]
 name = "cps-budget"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "cps-config",
  "serde_yaml",
@@ -408,7 +408,7 @@ dependencies = [
 
 [[package]]
 name = "cps-config"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "anyhow",
  "dirs",
@@ -422,7 +422,7 @@ dependencies = [
 
 [[package]]
 name = "cps-doc-runner"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "anyhow",
  "cps-config",
@@ -437,7 +437,7 @@ dependencies = [
 
 [[package]]
 name = "cps-doc-store"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "anyhow",
  "cps-tokenizer",
@@ -448,7 +448,7 @@ dependencies = [
 
 [[package]]
 name = "cps-exec"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "cps-proposal",
  "dirs",
@@ -460,7 +460,7 @@ dependencies = [
 
 [[package]]
 name = "cps-llm"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "anyhow",
  "cps-config",
@@ -475,7 +475,7 @@ dependencies = [
 
 [[package]]
 name = "cps-policy"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "anyhow",
  "cps-proposal",
@@ -488,7 +488,7 @@ dependencies = [
 
 [[package]]
 name = "cps-proposal"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "serde",
  "serde_json",
@@ -497,7 +497,7 @@ dependencies = [
 
 [[package]]
 name = "cps-search"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -514,7 +514,7 @@ dependencies = [
 
 [[package]]
 name = "cps-tokenizer"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "anyhow",
  "cps-config",
@@ -527,7 +527,7 @@ dependencies = [
 
 [[package]]
 name = "cps-ui"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "cps-policy",
  "cps-proposal",
