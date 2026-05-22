@@ -99,7 +99,8 @@ async fn run() -> Result<()> {
     let mut agent = AgentLoop::from_config(&config).context("failed to initialize agent loop")?;
     let counters = Arc::clone(agent.counters());
 
-    let verbose_rx = if cli.verbose {
+    let verbose = cli.verbose || config.runtime.verbose;
+    let verbose_rx = if verbose {
         let (tx, rx) = mpsc::unbounded_channel();
         agent.set_verbose(tx);
         Some(rx)

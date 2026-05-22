@@ -143,6 +143,9 @@ pub struct RuntimeConfig {
 
     #[serde(default = "default_max_tool_rounds")]
     pub max_tool_rounds: usize,
+
+    #[serde(default)]
+    pub verbose: bool,
 }
 
 fn default_global_timeout_ms() -> u64 {
@@ -173,6 +176,7 @@ impl Default for RuntimeConfig {
             transient_retries: default_transient_retries(),
             retry_delay_ms: default_retry_delay_ms(),
             max_tool_rounds: default_max_tool_rounds(),
+            verbose: false,
         }
     }
 }
